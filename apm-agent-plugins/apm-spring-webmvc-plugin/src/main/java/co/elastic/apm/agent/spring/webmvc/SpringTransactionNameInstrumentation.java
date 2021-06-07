@@ -35,18 +35,13 @@ import net.bytebuddy.matcher.ElementMatcher;
 import org.springframework.web.method.HandlerMethod;
 
 import javax.annotation.Nullable;
+import javax.servlet.http.HttpServletRequest;
 import java.util.Collection;
 import java.util.Collections;
 
 import static co.elastic.apm.agent.bci.bytebuddy.CustomElementMatchers.classLoaderCanLoadClass;
 import static co.elastic.apm.agent.impl.transaction.AbstractSpan.PRIO_HIGH_LEVEL_FRAMEWORK;
-import static net.bytebuddy.matcher.ElementMatchers.hasSuperType;
-import static net.bytebuddy.matcher.ElementMatchers.isInterface;
-import static net.bytebuddy.matcher.ElementMatchers.nameStartsWith;
-import static net.bytebuddy.matcher.ElementMatchers.named;
-import static net.bytebuddy.matcher.ElementMatchers.not;
-import static net.bytebuddy.matcher.ElementMatchers.returns;
-import static net.bytebuddy.matcher.ElementMatchers.takesArgument;
+import static net.bytebuddy.matcher.ElementMatchers.*;
 
 /**
  * This instrumentation sets the {@link Transaction#name} according to the handler responsible for this request.
@@ -103,28 +98,47 @@ public class SpringTransactionNameInstrumentation extends TracerAwareInstrumenta
         return Collections.singleton("spring-mvc");
     }
 
+    @Override
+    public boolean indyPlugin() {
+        return false;
+    }
+
     @VisibleForAdvice
     public static class HandlerAdapterAdvice {
 
         @Advice.OnMethodEnter(suppress = Throwable.class)
-        static void setTransactionName(@Advice.Argument(2) Object handler) {
+        static void setTransactionName(@Advice.Argument(0) HttpServletRequest request,
+                                       @Advice.Argument(2) Object handler) {
             final Transaction transaction = tracer.currentTransaction();
             if (transaction == null) {
                 return;
             }
-            final String className;
-            final String methodName;
-            if (handler instanceof HandlerMethod) {
-                HandlerMethod handlerMethod = ((HandlerMethod) handler);
-                className = handlerMethod.getBeanType().getSimpleName();
-                methodName = handlerMethod.getMethod().getName();
-            } else {
-                className = handler.getClass().getSimpleName();
-                methodName = null;
+            String urlPattern = (String) request.getAttribute("org.springframework.web.servlet.HandlerMapping.bestMatchingPattern");
+
+            if (urlPattern != null && !urlPattern.isEmpty())
+                setName(transaction, urlPattern);
+            else {
+                final String className;
+                final String methodName;
+                if (handler instanceof HandlerMethod) {
+                    HandlerMethod handlerMethod = ((HandlerMethod) handler);
+                    className = handlerMethod.getBeanType().getSimpleName();
+                    methodName = handlerMethod.getMethod().getName();
+                } else {
+                    className = handler.getClass().getSimpleName();
+                    methodName = null;
+                }
+                setName(transaction, className, methodName);
             }
-            setName(transaction, className, methodName);
             transaction.setFrameworkName(FRAMEWORK_NAME);
             transaction.setFrameworkVersion(VersionUtils.getVersion(HandlerMethod.class, "org.springframework", "spring-web"));
+        }
+
+        public static void setName(Transaction transaction, String urlPattern) {
+            final StringBuilder name = transaction.getAndOverrideName(PRIO_HIGH_LEVEL_FRAMEWORK);
+            if (name != null) {
+                name.append(urlPattern);
+            }
         }
 
         @VisibleForAdvice

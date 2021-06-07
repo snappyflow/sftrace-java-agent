@@ -32,11 +32,14 @@ import org.slf4j.LoggerFactory;
 import org.stagemonitor.util.IOUtils;
 
 import javax.annotation.Nullable;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLSocketFactory;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.Deflater;
 import java.util.zip.DeflaterOutputStream;
@@ -99,20 +102,49 @@ public class AbstractIntakeApiHandler {
         return endRequest;
     }
 
+    @Nullable
     protected HttpURLConnection startRequest(String endpoint) throws IOException {
         final HttpURLConnection connection = apmServerClient.startRequest(endpoint);
-        if (logger.isDebugEnabled()) {
-            logger.debug("Starting new request to {}", connection.getURL());
+        if (connection != null) {
+            try {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("Starting new request to {}", connection.getURL());
+                }
+                connection.setRequestMethod("POST");
+                connection.setDoOutput(true);
+                connection.setChunkedStreamingMode(DslJsonSerializer.BUFFER_SIZE);
+                connection.setRequestProperty("Content-Encoding", "deflate");
+                connection.setRequestProperty("Content-Type", "application/x-ndjson");
+                connection.setUseCaches(false);
+                connection.connect();
+                os = new DeflaterOutputStream(connection.getOutputStream(), deflater);
+                os.write(metaData);
+            } catch (IOException e) {
+                logger.error("Error trying to connect to APM Server. Some details about SSL configurations corresponding " +
+                    "the current connection are logged at INFO level.");
+                if (logger.isInfoEnabled() && connection instanceof HttpsURLConnection) {
+                    HttpsURLConnection httpsURLConnection = (HttpsURLConnection) connection;
+                    try {
+                        logger.info("Cipher suite used for this connection: {}", httpsURLConnection.getCipherSuite());
+                    } catch (Exception e1) {
+                        SSLSocketFactory sslSocketFactory = httpsURLConnection.getSSLSocketFactory();
+                        logger.info("Default cipher suites: {}", Arrays.toString(sslSocketFactory.getDefaultCipherSuites()));
+                        logger.info("Supported cipher suites: {}", Arrays.toString(sslSocketFactory.getSupportedCipherSuites()));
+                    }
+                    try {
+                        logger.info("APM Server certificates: {}", Arrays.toString(httpsURLConnection.getServerCertificates()));
+                    } catch (Exception e1) {
+                        // ignore - invalid
+                    }
+                    try {
+                        logger.info("Local certificates: {}", Arrays.toString(httpsURLConnection.getLocalCertificates()));
+                    } catch (Exception e1) {
+                        // ignore - invalid
+                    }
+                }
+                throw e;
+            }
         }
-        connection.setRequestMethod("POST");
-        connection.setDoOutput(true);
-        connection.setChunkedStreamingMode(DslJsonSerializer.BUFFER_SIZE);
-        connection.setRequestProperty("Content-Encoding", "deflate");
-        connection.setRequestProperty("Content-Type", "application/x-ndjson");
-        connection.setUseCaches(false);
-        connection.connect();
-        os = new DeflaterOutputStream(connection.getOutputStream(), deflater);
-        os.write(metaData);
         return connection;
     }
 
@@ -142,6 +174,7 @@ public class AbstractIntakeApiHandler {
             } finally {
                 HttpUtils.consumeAndClose(connection);
                 connection = null;
+                os = null;
                 deflater.reset();
                 currentlyTransmitting = 0;
             }
@@ -197,6 +230,10 @@ public class AbstractIntakeApiHandler {
 
     public long getDropped() {
         return dropped;
+    }
+
+    public int getErrorCount() {
+        return errorCount;
     }
 
     public void close() {
