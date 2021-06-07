@@ -10,6 +10,7 @@
 
     <artifactId>elastic-apm-agent</artifactId>
     <name>${project.groupId}:${project.artifactId}</name>
+    <packaging>jar</packaging>
 
     <properties>
         <elastic.apm.agent>co.elastic.apm.agent.bci.AgentMain</elastic.apm.agent>
@@ -257,6 +258,7 @@
     </dependencies>
 
     <build>
+        <finalName>sftrace-java-agent</finalName>
         <plugins>
             <plugin>
                 <artifactId>maven-source-plugin</artifactId>
