@@ -24,8 +24,8 @@
  */
 package co.elastic.apm.agent.bci;
 
-import co.elastic.apm.agent.shaded.codec.binary.Base64;
-import co.elastic.apm.agent.shaded.json.JSONObject;
+import org.apache.commons.codec.binary.Base64;
+import org.json.JSONObject;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
