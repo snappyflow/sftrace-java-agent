@@ -3,7 +3,7 @@
     <parent>
         <artifactId>integration-tests</artifactId>
         <groupId>co.elastic.apm</groupId>
-        <version>1.18.0.RC1</version>
+        <version>1.18.0</version>
     </parent>
     <modelVersion>4.0.0</modelVersion>
 
@@ -45,7 +45,11 @@
         -->
         <dependency>
             <groupId>${project.groupId}</groupId>
+            <!--
+            TODO use this artifact when we don't shade anymore
             <artifactId>elastic-apm-agent</artifactId>
+            -->
+            <artifactId>apm-api-plugin</artifactId>
             <version>${project.version}</version>
             <scope>test</scope>
         </dependency>

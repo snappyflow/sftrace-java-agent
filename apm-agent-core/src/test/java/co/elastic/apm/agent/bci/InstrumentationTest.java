@@ -27,7 +27,6 @@ package co.elastic.apm.agent.bci;
 import co.elastic.apm.agent.MockTracer;
 import co.elastic.apm.agent.bci.subpackage.AdviceInSubpackageInstrumentation;
 import co.elastic.apm.agent.configuration.CoreConfiguration;
-import co.elastic.apm.agent.configuration.SpyConfiguration;
 import co.elastic.apm.agent.impl.ElasticApmTracer;
 import co.elastic.apm.agent.impl.transaction.AbstractSpan;
 import co.elastic.apm.agent.impl.transaction.Span;
@@ -50,7 +49,6 @@ import org.apache.commons.math3.stat.StatUtils;
 import org.apache.commons.pool2.impl.CallStackUtils;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.event.SubstituteLoggingEvent;
@@ -90,14 +88,14 @@ class InstrumentationTest {
 
     @BeforeEach
     void setup() {
-        configurationRegistry = SpyConfiguration.createSpyConfig();
+        tracer = MockTracer.createRealTracer();
+        configurationRegistry = tracer.getConfigurationRegistry();
         coreConfig = configurationRegistry.getConfig(CoreConfiguration.class);
-        tracer = MockTracer.create(configurationRegistry);
     }
 
     @AfterEach
     void reset() {
-        MockTracer.resetTracer();
+        ElasticApmAgent.reset();
     }
 
     @Test
@@ -267,7 +265,7 @@ class InstrumentationTest {
             Collections.singletonList(new MathInstrumentation()));
         // if the instrumentation applied, it would return 42
         // but instrumenting old class file versions could lead to VerifyErrors in some cases and possibly some more shenanigans
-        // so we we are better off not touching Java 1.4 code at all
+        // so we we are better off not touching Java 1.3 code (like org.apache.commons.math.util.MathUtils) at all
         assertThat(MathUtils.sign(-42)).isEqualTo(-1);
     }
 
@@ -357,6 +355,24 @@ class InstrumentationTest {
 
         assertThat(StatUtilsInstrumentation.enterCount).hasPositiveValue();
         assertThat(StatUtilsInstrumentation.exitCount).hasPositiveValue();
+    }
+
+    @Test
+    void testPatchClassFileVersionJava4ToJava7CommonsMath() {
+        org.apache.log4j.LogManager.exists("not");
+
+        // retransforming classes and patch to bytecode level 51 (Java 7)
+        ElasticApmAgent.initInstrumentation(tracer,
+            ByteBuddyAgent.install(),
+            Collections.singletonList(new LogManagerInstrumentation()));
+
+        assertThat(LogManagerInstrumentation.enterCount).hasValue(0);
+        assertThat(LogManagerInstrumentation.exitCount).hasValue(0);
+
+        org.apache.log4j.LogManager.exists("not");
+
+        assertThat(LogManagerInstrumentation.enterCount).hasPositiveValue();
+        assertThat(LogManagerInstrumentation.exitCount).hasPositiveValue();
     }
 
     @Test
@@ -508,6 +524,11 @@ class InstrumentationTest {
         public Collection<String> getInstrumentationGroupNames() {
             return List.of("test", "experimental");
         }
+
+        @Override
+        public boolean indyPlugin() {
+            return false;
+        }
     }
 
     public static class MathInstrumentation extends TracerAwareInstrumentation {
@@ -531,6 +552,11 @@ class InstrumentationTest {
         public Collection<String> getInstrumentationGroupNames() {
             return Collections.emptyList();
         }
+
+        @Override
+        public boolean indyPlugin() {
+            return false;
+        }
     }
 
     public static class ExceptionInstrumentation extends TracerAwareInstrumentation {
@@ -552,6 +578,11 @@ class InstrumentationTest {
         @Override
         public Collection<String> getInstrumentationGroupNames() {
             return Collections.emptyList();
+        }
+
+        @Override
+        public boolean indyPlugin() {
+            return false;
         }
     }
 
@@ -581,6 +612,11 @@ class InstrumentationTest {
         public Collection<String> getInstrumentationGroupNames() {
             return Collections.emptyList();
         }
+
+        @Override
+        public boolean indyPlugin() {
+            return false;
+        }
     }
 
     public static class FieldAccessInstrumentation extends TracerAwareInstrumentation {
@@ -604,6 +640,11 @@ class InstrumentationTest {
         @Override
         public Collection<String> getInstrumentationGroupNames() {
             return List.of("test", "experimental");
+        }
+
+        @Override
+        public boolean indyPlugin() {
+            return false;
         }
     }
 
@@ -629,6 +670,11 @@ class InstrumentationTest {
         public Collection<String> getInstrumentationGroupNames() {
             return List.of("test", "experimental");
         }
+
+        @Override
+        public boolean indyPlugin() {
+            return false;
+        }
     }
 
     public static class AssignToArgumentInstrumentation extends TracerAwareInstrumentation {
@@ -652,6 +698,11 @@ class InstrumentationTest {
         @Override
         public Collection<String> getInstrumentationGroupNames() {
             return List.of("test", "experimental");
+        }
+
+        @Override
+        public boolean indyPlugin() {
+            return false;
         }
     }
 
@@ -680,6 +731,11 @@ class InstrumentationTest {
         public Collection<String> getInstrumentationGroupNames() {
             return List.of("test", "experimental");
         }
+
+        @Override
+        public boolean indyPlugin() {
+            return false;
+        }
     }
 
     public static class AssignToReturnArrayInstrumentation extends TracerAwareInstrumentation {
@@ -703,6 +759,11 @@ class InstrumentationTest {
         @Override
         public Collection<String> getInstrumentationGroupNames() {
             return List.of("test", "experimental");
+        }
+
+        @Override
+        public boolean indyPlugin() {
+            return false;
         }
     }
 
@@ -788,6 +849,38 @@ class InstrumentationTest {
         @Override
         public ElementMatcher<? super TypeDescription> getTypeMatcher() {
             return named(StatUtils.class.getName());
+        }
+
+        @Override
+        public ElementMatcher<? super MethodDescription> getMethodMatcher() {
+            return any();
+        }
+
+        @Override
+        public Collection<String> getInstrumentationGroupNames() {
+            return Collections.singletonList("test");
+        }
+
+    }
+
+    public static class LogManagerInstrumentation extends ElasticApmInstrumentation {
+
+        public static AtomicInteger enterCount = GlobalVariables.get(LogManagerInstrumentation.class, "enterCount", new AtomicInteger());
+        public static AtomicInteger exitCount = GlobalVariables.get(LogManagerInstrumentation.class, "exitCount", new AtomicInteger());
+
+        @Advice.OnMethodEnter(inline = false)
+        public static void onEnter() {
+            enterCount.incrementAndGet();
+        }
+
+        @Advice.OnMethodExit(inline = false)
+        public static void onExit() {
+            exitCount.incrementAndGet();
+        }
+
+        @Override
+        public ElementMatcher<? super TypeDescription> getTypeMatcher() {
+            return named("org.apache.log4j.LogManager");
         }
 
         @Override
@@ -962,11 +1055,6 @@ class InstrumentationTest {
         @Override
         public Collection<String> getInstrumentationGroupNames() {
             return Collections.singletonList("test");
-        }
-
-        @Override
-        public boolean indyPlugin() {
-            return true;
         }
     }
 
