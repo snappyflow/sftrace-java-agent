@@ -20,6 +20,7 @@
     <modules>
         <module>apm-jaxrs-plugin</module>
         <module>apm-jdbc-plugin</module>
+        <module>apm-hibernate-plugin</module>
         <module>apm-jsf-plugin</module>
         <module>apm-opentracing-plugin</module>
         <module>apm-servlet-plugin</module>

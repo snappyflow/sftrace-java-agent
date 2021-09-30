@@ -24,19 +24,22 @@
  */
 package co.elastic.apm.agent.bci;
 
-import org.apache.commons.codec.binary.Base64;
-import org.json.JSONObject;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
+import java.nio.file.FileSystems;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
+
 import javax.crypto.Cipher;
 import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
+
+import org.apache.commons.codec.binary.Base64;
+import org.json.JSONObject;
 
 public class SFAgentUtil {
   private static byte[] key;
@@ -44,7 +47,7 @@ public class SFAgentUtil {
   public SFConfigInfo parseSFAgentYamlFile() {
     FileReader fr = null;
     try {
-      File file = new File("/opt/sfagent/config.yaml");
+      File file = new File(setSFtraceConfig());
       fr = new FileReader(file);
       BufferedReader br = new BufferedReader(fr);
       SFConfigInfo cfgInfo = new SFConfigInfo();
@@ -87,6 +90,20 @@ public class SFAgentUtil {
       
       } catch (Exception exception) {}
     } 
+  }
+  
+  public String setSFtraceConfig() {
+	  
+	  String sfConfFileName = "config.yaml";
+	  String s = FileSystems.getDefault().getSeparator();
+	  String confProp = System.getProperty("sftrace.config");
+	  String confEnv = System.getenv("SFTRACE_CONFIG");
+	  String sfConf = confEnv != null ? confEnv :
+		  					confProp != null ? confProp:
+		  						"/opt/sfagent"; //Fallback to Linux path
+	  
+	  return sfConf+s+sfConfFileName;
+			  			
   }
   
   public void setAgentInputParams() {
