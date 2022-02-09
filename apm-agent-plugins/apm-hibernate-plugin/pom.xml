@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<project
+	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd"
+	xmlns="http://maven.apache.org/POM/4.0.0"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+	<modelVersion>4.0.0</modelVersion>
+	<parent>
+		<groupId>co.elastic.apm</groupId>
+		<artifactId>apm-agent-plugins</artifactId>
+		<version>1.28.5-SNAPSHOT</version>
+	</parent>
+	<artifactId>apm-hibernate-plugin</artifactId>
+	<name>${project.groupId}:${project.artifactId}</name>
+
+	<properties>
+		<apm-agent-parent.base.dir>${project.basedir}/../..</apm-agent-parent.base.dir>
+		<testcontainers-version>1.12.0</testcontainers-version>
+		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+	</properties>
+
+	<dependencies>
+		<dependency>
+			<groupId>org.hibernate</groupId>
+			<artifactId>hibernate-core</artifactId>
+			<version>5.5.4.Final</version>
+			<scope>provided</scope>
+		</dependency>
+	</dependencies>
+
+</project>

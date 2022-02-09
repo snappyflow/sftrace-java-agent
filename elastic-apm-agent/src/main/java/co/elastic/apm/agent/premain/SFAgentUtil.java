@@ -16,7 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-package co.elastic.apm.agent.bci;
+package co.elastic.apm.agent.premain;
 
 import java.io.BufferedReader;
 import java.io.File;
