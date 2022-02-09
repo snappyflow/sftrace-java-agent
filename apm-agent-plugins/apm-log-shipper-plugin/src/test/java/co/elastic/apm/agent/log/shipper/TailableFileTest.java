@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,13 +15,14 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.log.shipper;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 
 import java.io.File;
 import java.io.IOException;
@@ -42,7 +38,7 @@ import static java.nio.file.StandardOpenOption.CREATE_NEW;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-
+@DisabledOnOs(OS.WINDOWS)
 class TailableFileTest {
 
     private final ByteBuffer buffy = ByteBuffer.allocate(1024);
@@ -63,14 +59,14 @@ class TailableFileTest {
     }
 
     @Test
-    void testReadLogOneLine() throws IOException {
+    void testReadLogOneLine() throws Exception {
         tailableFile.tail(buffy, logListener, 1);
         assertThat(logListener.lines).hasSize(1);
         assertThat(logListener.lines.get(0)).isEqualTo("foo");
     }
 
     @Test
-    void testReadLogTwoTimesOneLine() throws IOException {
+    void testReadLogTwoTimesOneLine() throws Exception {
         tailableFile.tail(buffy, logListener, 1);
         assertThat(logListener.lines).hasSize(1);
         assertThat(logListener.lines.get(0)).isEqualTo("foo");
@@ -157,14 +153,14 @@ class TailableFileTest {
     }
 
     @Test
-    void testReadLog() throws IOException {
+    void testReadLog() throws Exception {
         assertThat(logFile.length()).isGreaterThan(0);
         tailableFile.tail(buffy, logListener, 5);
         assertThat(logListener.lines).containsExactly("foo", "bar", "baz", "qux");
     }
 
     @Test
-    void testNonExistingFile() throws IOException {
+    void testNonExistingFile() throws Exception {
         TailableFile file = new TailableFile(logFile.toPath().getParent().resolve("404.log").toFile());
         try (file) {
             file.tail(buffy, logListener, 5);
@@ -175,7 +171,7 @@ class TailableFileTest {
     }
 
     @Test
-    void testInitiallyNonExistingFile() throws IOException {
+    void testInitiallyNonExistingFile() throws Exception {
         TailableFile file = new TailableFile(logFile.toPath().getParent().resolve("404.log").toFile());
         try (file) {
             file.tail(buffy, logListener, 5);
@@ -202,14 +198,14 @@ class TailableFileTest {
     }
 
     @Test
-    void testReadOneLine() throws IOException {
+    void testReadOneLine() throws Exception {
         ByteBuffer bytes = ByteBuffer.wrap(new byte[]{'c', 'a', 'f', 'e', '\n', 'b', 'a', 'b', 'e', '\r', '\n'});
         TailableFile.readLines(tailableFile, bytes, 1, logListener);
         assertThat(logListener.lines).containsExactly("cafe");
     }
 
     @Test
-    void testRetry() throws IOException {
+    void testRetry() throws Exception {
         ByteBuffer bytes = ByteBuffer.wrap(new byte[]{'c', 'a', 'f', 'e', '\n'});
         List<String> readBytes = new ArrayList<>();
         AtomicBoolean processingSuccessful = new AtomicBoolean(false);
@@ -224,7 +220,7 @@ class TailableFileTest {
     }
 
     @Test
-    void testReadTwoLines() throws IOException {
+    void testReadTwoLines() throws Exception {
         ByteBuffer bytes = ByteBuffer.wrap(new byte[]{'c', 'a', 'f', 'e', '\n', 'b', 'a', 'b', 'e', '\r', '\n'});
         TailableFile.readLines(tailableFile, bytes, 4, logListener);
         assertThat(logListener.lines).containsExactly("cafe", "babe");

@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,15 +15,17 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.servlet;
 
+import co.elastic.apm.agent.configuration.CoreConfiguration;
 import co.elastic.apm.agent.impl.TracerInternalApiUtils;
+import co.elastic.apm.agent.impl.context.web.ResultUtil;
 import co.elastic.apm.agent.impl.transaction.Span;
 import okhttp3.Response;
 import org.eclipse.jetty.servlet.ErrorPageErrorHandler;
 import org.eclipse.jetty.servlet.ServletContextHandler;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import javax.servlet.DispatcherType;
@@ -46,6 +43,7 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.util.Collections;
 import java.util.EnumSet;
 
 import static co.elastic.apm.agent.servlet.RequestDispatcherSpanType.ERROR;
@@ -54,8 +52,16 @@ import static co.elastic.apm.agent.servlet.RequestDispatcherSpanType.INCLUDE;
 import static co.elastic.apm.agent.servlet.ServletApiAdvice.SPAN_SUBTYPE;
 import static co.elastic.apm.agent.servlet.ServletApiAdvice.SPAN_TYPE;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.when;
 
 class ServletInstrumentationTest extends AbstractServletTest {
+
+    @BeforeEach
+    void beforeEach() {
+        // servlet type & subtype are nor part of shared spec
+        reporter.disableCheckStrictSpanType();
+    }
 
     @Override
     protected void setUpHandler(ServletContextHandler handler) {
@@ -127,6 +133,32 @@ class ServletInstrumentationTest extends AbstractServletTest {
     }
 
     @Test
+    void testForward_DispatchSpansDisabled() throws Exception {
+        when(getConfig().getConfig(CoreConfiguration.class).isInstrumentationEnabled(eq(Constants.SERVLET_API_DISPATCH)))
+            .thenReturn(false);
+        callServlet(1, "/forward");
+        assertThat(reporter.getSpans()).isEmpty();
+    }
+
+    @Test
+    void testInclude_DispatchSpansDisabled() throws Exception {
+        when(getConfig().getConfig(CoreConfiguration.class).isInstrumentationEnabled(eq(Constants.SERVLET_API_DISPATCH)))
+            .thenReturn(false);
+        callServlet(1, "/include");
+        assertThat(reporter.getSpans()).isEmpty();
+    }
+
+    @Test
+    void testClientError_DispatchSpansDisabled() throws Exception {
+        when(getConfig().getConfig(CoreConfiguration.class).isInstrumentationEnabled(eq(Constants.SERVLET_API_DISPATCH)))
+            .thenReturn(false);
+        callServlet(1, "/unknown", "Hello Error!", 404);
+        assertThat(reporter.getSpans()).isEmpty();
+        assertThat(reporter.getErrors().size()).isEqualTo(1);
+        assertThat(reporter.getFirstError().getException()).isInstanceOf(ErrorServlet.HelloException.class);
+    }
+
+    @Test
     void testServerError() throws Exception {
         callServlet(1, "/throw-error", "Hello Error!", 500);
         // Because the servlet itself throws an Exception, the server ends the transaction before it delegates to the
@@ -183,6 +215,11 @@ class ServletInstrumentationTest extends AbstractServletTest {
         }
         assertThat(reporter.getTransactions())
             .hasSize(expectedTransactions);
+
+        reporter.getTransactions().stream().forEach( t -> {
+            assertThat(t.getResult()).isEqualTo(ResultUtil.getResultByHttpStatus(expectedStatusCode));
+            assertThat(t.getOutcome()).isEqualTo(ResultUtil.getOutcomeByHttpServerStatus(expectedStatusCode));
+        });
     }
 
 

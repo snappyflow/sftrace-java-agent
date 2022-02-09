@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,7 +15,6 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.impl.context;
 
@@ -134,7 +128,9 @@ class BodyProcessorTest {
 
     private Transaction processTransaction() {
         final Transaction transaction = new Transaction(tracer);
-        transaction.getContext().getRequest().withBodyBuffer().append("foo").flip();
+        Request request = transaction.getContext().getRequest();
+        request.withBodyBuffer().append("foo");
+        request.endOfBufferInput();
         transaction.getContext().getMessage().withBody("bar");
         bodyProcessor.processBeforeReport(transaction);
         return transaction;
@@ -142,7 +138,9 @@ class BodyProcessorTest {
 
     private ErrorCapture processError() {
         final ErrorCapture error = new ErrorCapture(tracer);
-        error.getContext().getRequest().withBodyBuffer().append("foo").flip();
+        Request request = error.getContext().getRequest();
+        request.withBodyBuffer().append("foo");
+        request.endOfBufferInput();
         error.getContext().getMessage().withBody("bar");
         bodyProcessor.processBeforeReport(error);
         return error;

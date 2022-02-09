@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2019 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,7 +15,6 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.profiler.asyncprofiler;
 
@@ -31,8 +25,8 @@ import co.elastic.apm.agent.profiler.collections.Int2IntHashMap;
 import co.elastic.apm.agent.profiler.collections.Int2ObjectHashMap;
 import co.elastic.apm.agent.profiler.collections.Long2LongHashMap;
 import co.elastic.apm.agent.profiler.collections.Long2ObjectHashMap;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import co.elastic.apm.agent.sdk.logging.Logger;
+import co.elastic.apm.agent.sdk.logging.LoggerFactory;
 
 import javax.annotation.Nullable;
 import java.io.File;
@@ -107,6 +101,10 @@ public class JfrParser implements Recyclable {
         this.includedClasses = includedClasses;
         bufferedFile.setFile(file);
         long fileSize = bufferedFile.size();
+        if (fileSize < 16) {
+            throw new IllegalStateException("Unexpected sampling profiler error, everything else should work as expected. " +
+                "Please report to us with as many details, including OS and JVM details.");
+        }
         logger.debug("Parsing {} ({} bytes)", file, fileSize);
         bufferedFile.ensureRemaining(16, 16);
         for (byte magicByte : MAGIC_BYTES) {

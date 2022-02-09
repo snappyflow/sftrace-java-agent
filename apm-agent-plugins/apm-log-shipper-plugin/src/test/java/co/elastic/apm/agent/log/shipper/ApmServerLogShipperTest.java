@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,26 +15,26 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.log.shipper;
 
+import co.elastic.apm.agent.configuration.CoreConfiguration;
 import co.elastic.apm.agent.configuration.SpyConfiguration;
-import co.elastic.apm.agent.impl.MetaData;
+import co.elastic.apm.agent.impl.metadata.MetaDataMock;
 import co.elastic.apm.agent.impl.stacktrace.StacktraceConfiguration;
 import co.elastic.apm.agent.report.ApmServerClient;
 import co.elastic.apm.agent.report.ReporterConfiguration;
 import co.elastic.apm.agent.report.serialize.DslJsonSerializer;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.tomakehurst.wiremock.WireMockServer;
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
-import com.github.tomakehurst.wiremock.junit.WireMockRule;
-import org.assertj.core.util.Lists;
 import org.awaitility.Awaitility;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.stagemonitor.configuration.ConfigurationRegistry;
 
 import java.io.BufferedReader;
@@ -50,12 +45,12 @@ import java.net.MalformedURLException;
 import java.net.URL;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
-import java.util.zip.InflaterInputStream;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
 import static com.github.tomakehurst.wiremock.client.WireMock.ok;
@@ -64,27 +59,28 @@ import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static org.assertj.core.api.Assertions.assertThat;
 
-public class ApmServerLogShipperTest {
+@DisabledOnOs(OS.WINDOWS)
+class ApmServerLogShipperTest {
 
-    @Rule
-    public WireMockRule mockApmServer = new WireMockRule(WireMockConfiguration.wireMockConfig().dynamicPort());
+    public WireMockServer mockApmServer = new WireMockServer(WireMockConfiguration.wireMockConfig().dynamicPort());
     private TailableFile tailableFile;
     private ApmServerLogShipper logShipper;
     private File logFile;
     private final ByteBuffer buffer = ByteBuffer.allocate(1024);
     private ApmServerClient apmServerClient;
 
-    @Before
-    public void setUp() throws Exception {
+    @BeforeEach
+    void setUp() throws Exception {
         ConfigurationRegistry config = SpyConfiguration.createSpyConfig();
         mockApmServer.stubFor(post("/intake/v2/logs").willReturn(ok()));
         mockApmServer.stubFor(get("/").willReturn(ok()));
+        mockApmServer.start();
 
-        apmServerClient = new ApmServerClient(config.getConfig(ReporterConfiguration.class));
+        apmServerClient = new ApmServerClient(config.getConfig(ReporterConfiguration.class), config.getConfig(CoreConfiguration.class));
         startClientWithValidUrls();
 
-        DslJsonSerializer serializer = new DslJsonSerializer(config.getConfig(StacktraceConfiguration.class), apmServerClient);
-        logShipper = new ApmServerLogShipper(apmServerClient, config.getConfig(ReporterConfiguration.class), MetaData.create(config, null), serializer);
+        DslJsonSerializer serializer = new DslJsonSerializer(config.getConfig(StacktraceConfiguration.class), apmServerClient, MetaDataMock.create());
+        logShipper = new ApmServerLogShipper(apmServerClient, config.getConfig(ReporterConfiguration.class), serializer);
         logFile = File.createTempFile("test", ".log");
         tailableFile = new TailableFile(logFile);
     }
@@ -93,15 +89,17 @@ public class ApmServerLogShipperTest {
         apmServerClient.start(List.of(new URL("http", "localhost", mockApmServer.port(), "/")));
     }
 
-    @After
-    public void tearDown() {
+    @AfterEach
+    void tearDown() {
+        mockApmServer.stop();
+
         if (!logFile.delete()) {
             logFile.deleteOnExit();
         }
     }
 
     @Test
-    public void testSendLogs() throws Exception {
+    void testSendLogs() throws Exception {
         Files.write(logFile.toPath(), List.of("foo"));
         assertThat(tailableFile.tail(buffer, logShipper, 100)).isEqualTo(1);
         logShipper.endRequest();
@@ -115,15 +113,15 @@ public class ApmServerLogShipperTest {
     }
 
     @Test
-    public void testSendLogsAfterServerUrlsSet() throws Exception {
-        apmServerClient.start(Lists.emptyList());
+    void testSendLogsAfterServerUrlsSet() throws Exception {
+        apmServerClient.start(Collections.emptyList());
         Files.write(logFile.toPath(), List.of("foo"));
         assertThat(logShipper.getErrorCount()).isEqualTo(0);
         Future<Integer> readLinesFuture = Executors.newSingleThreadExecutor().submit(() -> tailableFile.tail(buffer, logShipper, 100));
         // Wait until first failure to send file lines
         Awaitility.await()
             .pollInterval(1, TimeUnit.MILLISECONDS)
-            .timeout(100, TimeUnit.MILLISECONDS)
+            .timeout(500, TimeUnit.MILLISECONDS)
             .untilAsserted(() -> assertThat(logShipper.getErrorCount()).isGreaterThan(0));
         // Set valid APM server URLs
         startClientWithValidUrls();
@@ -144,7 +142,7 @@ public class ApmServerLogShipperTest {
     private List<String> getEvents() {
         return mockApmServer.findAll(postRequestedFor(urlEqualTo(ApmServerLogShipper.LOGS_ENDPOINT)))
             .stream()
-            .flatMap(request -> new BufferedReader(new InputStreamReader(new InflaterInputStream(new ByteArrayInputStream(request.getBody())))).lines())
+            .flatMap(request -> new BufferedReader(new InputStreamReader(new ByteArrayInputStream(request.getBody()))).lines())
             .collect(Collectors.toList());
     }
 }

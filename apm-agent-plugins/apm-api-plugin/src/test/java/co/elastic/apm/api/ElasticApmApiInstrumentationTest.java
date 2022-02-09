@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,11 +15,10 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.api;
 
-import co.elastic.apm.agent.AbstractInstrumentationTest;
+import co.elastic.apm.AbstractApiTest;
 import co.elastic.apm.agent.impl.Scope;
 import co.elastic.apm.agent.impl.TextHeaderMapAccessor;
 import co.elastic.apm.agent.impl.TracerInternalApiUtils;
@@ -37,7 +31,7 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-class ElasticApmApiInstrumentationTest extends AbstractInstrumentationTest {
+class ElasticApmApiInstrumentationTest extends AbstractApiTest {
 
     @Test
     void testCreateTransaction() {
@@ -91,6 +85,8 @@ class ElasticApmApiInstrumentationTest extends AbstractInstrumentationTest {
 
     @Test
     void testTransactionWithError() {
+        reporter.disableCheckUnknownOutcome();
+
         final Transaction transaction = ElasticApm.startTransaction();
         transaction.setType("request");
         transaction.setName("transaction");
@@ -102,7 +98,7 @@ class ElasticApmApiInstrumentationTest extends AbstractInstrumentationTest {
 
     @Test
     void testCreateChildSpanOfCurrentTransaction() {
-        final co.elastic.apm.agent.impl.transaction.Transaction transaction = tracer.startRootTransaction(null).withType("request").withName("transaction").activate();
+        final co.elastic.apm.agent.impl.transaction.Transaction transaction = startTestRootTransaction();
         final Span span = ElasticApm.currentSpan().startSpan("db", "mysql", "query");
         span.setName("span");
         span.end();
@@ -118,7 +114,7 @@ class ElasticApmApiInstrumentationTest extends AbstractInstrumentationTest {
 
     @Test
     void testLegacySpanCreationAndTyping() {
-        final co.elastic.apm.agent.impl.transaction.Transaction transaction = tracer.startRootTransaction(null).withType("request").withName("transaction").activate();
+        final co.elastic.apm.agent.impl.transaction.Transaction transaction = startTestRootTransaction();
         final Span span = ElasticApm.currentSpan().createSpan();
         span.setName("span");
         span.setType("db.mysql.query.etc");
@@ -136,7 +132,8 @@ class ElasticApmApiInstrumentationTest extends AbstractInstrumentationTest {
     // https://github.com/elastic/apm-agent-java/issues/132
     @Test
     void testAutomaticAndManualTransactions() {
-        final co.elastic.apm.agent.impl.transaction.Transaction transaction = tracer.startRootTransaction(null).withType("request").withName("transaction").activate();
+
+        final co.elastic.apm.agent.impl.transaction.Transaction transaction = startTestRootTransaction();
         final Transaction manualTransaction = ElasticApm.startTransaction();
         manualTransaction.setName("manual transaction");
         manualTransaction.setType("request");
@@ -147,13 +144,14 @@ class ElasticApmApiInstrumentationTest extends AbstractInstrumentationTest {
 
     @Test
     void testGetId_distributedTracingEnabled() {
+
         co.elastic.apm.agent.impl.transaction.Transaction transaction = tracer.startRootTransaction(null).withType(Transaction.TYPE_REQUEST);
         try (Scope scope = transaction.activateInScope()) {
             assertThat(ElasticApm.currentTransaction().getId()).isEqualTo(transaction.getTraceContext().getId().toString());
             assertThat(ElasticApm.currentTransaction().getTraceId()).isEqualTo(transaction.getTraceContext().getTraceId().toString());
             assertThat(ElasticApm.currentSpan().getId()).isEqualTo(transaction.getTraceContext().getId().toString());
             assertThat(ElasticApm.currentSpan().getTraceId()).isEqualTo(transaction.getTraceContext().getTraceId().toString());
-            co.elastic.apm.agent.impl.transaction.Span span = transaction.createSpan().withType("db").withName("SELECT");
+            co.elastic.apm.agent.impl.transaction.Span span = transaction.createSpan().withType("db").withSubtype("mysql").withName("SELECT");
             try (Scope spanScope = span.activateInScope()) {
                 assertThat(ElasticApm.currentSpan().getId()).isEqualTo(span.getTraceContext().getId().toString());
                 assertThat(ElasticApm.currentSpan().getTraceId()).isEqualTo(span.getTraceContext().getTraceId().toString());
@@ -173,35 +171,41 @@ class ElasticApmApiInstrumentationTest extends AbstractInstrumentationTest {
 
     @Test
     void testAddLabel() {
+
         Transaction transaction = ElasticApm.startTransaction();
         transaction.setName("foo");
-        transaction.setType("bar");
+        transaction.setType("request");
         transaction.addLabel("foo1", "bar1");
         transaction.addLabel("foo", "bar");
         transaction.addLabel("number", 1);
         transaction.addLabel("boolean", true);
         transaction.addLabel("null", (String) null);
-        Span span = transaction.startSpan("bar", null, null);
+        Span span = transaction.startSpan("custom", null, null);
         span.setName("foo");
         span.addLabel("bar1", "baz1");
         span.addLabel("bar", "baz");
         span.addLabel("number", 1);
         span.addLabel("boolean", true);
         span.addLabel("null", (String) null);
+        span.setOutcome(Outcome.FAILURE);
         span.end();
-        transaction.end();
+        transaction.setOutcome(Outcome.SUCCESS).end();
         assertThat(reporter.getTransactions()).hasSize(1);
-        assertThat(reporter.getSpans()).hasSize(1);
+
         assertThat(reporter.getFirstTransaction().getContext().getLabel("foo1")).isEqualTo("bar1");
         assertThat(reporter.getFirstTransaction().getContext().getLabel("foo")).isEqualTo("bar");
         assertThat(reporter.getFirstTransaction().getContext().getLabel("number")).isEqualTo(1);
         assertThat(reporter.getFirstTransaction().getContext().getLabel("boolean")).isEqualTo(true);
         assertThat(reporter.getFirstTransaction().getContext().getLabel("null")).isNull();
+        assertThat(reporter.getFirstTransaction().getOutcome().toString()).isEqualTo("success");
+
+        assertThat(reporter.getSpans()).hasSize(1);
         assertThat(reporter.getFirstSpan().getContext().getLabel("bar1")).isEqualTo("baz1");
         assertThat(reporter.getFirstSpan().getContext().getLabel("bar")).isEqualTo("baz");
         assertThat(reporter.getFirstSpan().getContext().getLabel("number")).isEqualTo(1);
         assertThat(reporter.getFirstSpan().getContext().getLabel("boolean")).isEqualTo(true);
         assertThat(reporter.getFirstSpan().getContext().getLabel("null")).isNull();
+        assertThat(reporter.getFirstSpan().getOutcome().toString()).isEqualTo("failure");
     }
 
     @Test

@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,15 +15,13 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.report;
 
-import co.elastic.apm.agent.impl.MetaData;
 import co.elastic.apm.agent.report.serialize.DslJsonSerializer;
 import co.elastic.apm.agent.report.serialize.PayloadSerializer;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import co.elastic.apm.agent.sdk.logging.Logger;
+import co.elastic.apm.agent.sdk.logging.LoggerFactory;
 import org.stagemonitor.util.IOUtils;
 
 import javax.annotation.Nullable;
@@ -38,7 +31,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
-import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.Deflater;
@@ -46,13 +38,11 @@ import java.util.zip.DeflaterOutputStream;
 
 public class AbstractIntakeApiHandler {
     protected final Logger logger = LoggerFactory.getLogger(getClass());
-    protected static final int GZIP_COMPRESSION_LEVEL = 1;
     private static final Object WAIT_LOCK = new Object();
 
     protected final ReporterConfiguration reporterConfiguration;
     protected final PayloadSerializer payloadSerializer;
     protected final ApmServerClient apmServerClient;
-    protected final byte[] metaData;
     protected Deflater deflater;
     protected long currentlyTransmitting = 0;
     protected long reported = 0;
@@ -61,21 +51,18 @@ public class AbstractIntakeApiHandler {
     protected HttpURLConnection connection;
     @Nullable
     protected OutputStream os;
+    @Nullable
+    private CountingOutputStream countingOs;
     protected int errorCount;
     protected volatile boolean shutDown;
+    private volatile boolean healthy = true;
+    private long requestStartedNanos;
 
-    public AbstractIntakeApiHandler(ReporterConfiguration reporterConfiguration, MetaData metaData, PayloadSerializer payloadSerializer, ApmServerClient apmServerClient) {
+    public AbstractIntakeApiHandler(ReporterConfiguration reporterConfiguration, PayloadSerializer payloadSerializer, ApmServerClient apmServerClient) {
         this.reporterConfiguration = reporterConfiguration;
         this.payloadSerializer = payloadSerializer;
         this.apmServerClient = apmServerClient;
-        this.deflater = new Deflater(GZIP_COMPRESSION_LEVEL);
-        payloadSerializer.serializeMetaDataNdJson(metaData);
-        this.metaData = payloadSerializer.toString().getBytes(StandardCharsets.UTF_8);
-        try {
-            payloadSerializer.flush();
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
+        this.deflater = new Deflater(Deflater.BEST_SPEED);
     }
 
     /*
@@ -94,7 +81,10 @@ public class AbstractIntakeApiHandler {
     }
 
     protected boolean shouldEndRequest() {
-        final long written = deflater.getBytesWritten() + DslJsonSerializer.BUFFER_SIZE;
+        if (countingOs == null) {
+            return false;
+        }
+        final long written = countingOs.getCount() + payloadSerializer.getBufferSize();
         final boolean endRequest = written >= reporterConfiguration.getApiRequestSize();
         if (endRequest && logger.isDebugEnabled()) {
             logger.debug("Flushing, because request size limit exceeded {}/{}", written, reporterConfiguration.getApiRequestSize());
@@ -103,9 +93,11 @@ public class AbstractIntakeApiHandler {
     }
 
     @Nullable
-    protected HttpURLConnection startRequest(String endpoint) throws IOException {
+    protected HttpURLConnection startRequest(String endpoint) throws Exception {
+        payloadSerializer.blockUntilReady();
         final HttpURLConnection connection = apmServerClient.startRequest(endpoint);
         if (connection != null) {
+            boolean useCompression = !isLocalhost(connection);
             try {
                 if (logger.isDebugEnabled()) {
                     logger.debug("Starting new request to {}", connection.getURL());
@@ -113,15 +105,25 @@ public class AbstractIntakeApiHandler {
                 connection.setRequestMethod("POST");
                 connection.setDoOutput(true);
                 connection.setChunkedStreamingMode(DslJsonSerializer.BUFFER_SIZE);
-                connection.setRequestProperty("Content-Encoding", "deflate");
+                if (useCompression) {
+                    connection.setRequestProperty("Content-Encoding", "deflate");
+                }
                 connection.setRequestProperty("Content-Type", "application/x-ndjson");
                 connection.setUseCaches(false);
                 connection.connect();
-                os = new DeflaterOutputStream(connection.getOutputStream(), deflater);
-                os.write(metaData);
+                countingOs = new CountingOutputStream(connection.getOutputStream());
+                if (useCompression) {
+                    os = new DeflaterOutputStream(countingOs, deflater, true);
+                } else {
+                    os = countingOs;
+                }
+                payloadSerializer.setOutputStream(os);
+                payloadSerializer.appendMetaDataNdJsonToStream();
+                payloadSerializer.flushToOutputStream();
+                requestStartedNanos = System.nanoTime();
             } catch (IOException e) {
-                logger.error("Error trying to connect to APM Server. Some details about SSL configurations corresponding " +
-                    "the current connection are logged at INFO level.");
+                logger.error("Error trying to connect to APM Server at {}. Some details about SSL configurations corresponding " +
+                    "the current connection are logged at INFO level.", connection.getURL());
                 if (logger.isInfoEnabled() && connection instanceof HttpsURLConnection) {
                     HttpsURLConnection httpsURLConnection = (HttpsURLConnection) connection;
                     try {
@@ -148,10 +150,22 @@ public class AbstractIntakeApiHandler {
         return connection;
     }
 
+    private boolean isLocalhost(HttpURLConnection connection) {
+        switch (connection.getURL().getHost()) {
+            case "localhost":
+            case "127.0.0.1":
+            case "[::1]":
+            case "[0:0:0:0:0:0:0:1]":
+                return true;
+            default:
+                return false;
+        }
+    }
+
     public void endRequest() {
         if (connection != null) {
             try {
-                payloadSerializer.flush();
+                payloadSerializer.fullFlush();
                 if (os != null) {
                     os.close();
                 }
@@ -175,10 +189,15 @@ public class AbstractIntakeApiHandler {
                 HttpUtils.consumeAndClose(connection);
                 connection = null;
                 os = null;
+                countingOs = null;
                 deflater.reset();
                 currentlyTransmitting = 0;
             }
         }
+    }
+
+    protected boolean isApiRequestTimeExpired() {
+        return System.nanoTime() >= requestStartedNanos + TimeUnit.MILLISECONDS.toNanos(reporterConfiguration.getApiRequestTime().getMillis());
     }
 
     protected void onRequestError(Integer responseCode, InputStream inputStream, @Nullable IOException e) {
@@ -209,19 +228,30 @@ public class AbstractIntakeApiHandler {
                 "Please use APM Server 6.5.0 or newer.");
         }
 
+        backoff();
+    }
+
+    private void backoff() {
         long backoffTimeSeconds = getBackoffTimeSeconds(errorCount++);
         logger.info("Backing off for {} seconds (+/-10%)", backoffTimeSeconds);
         final long backoffTimeMillis = TimeUnit.SECONDS.toMillis(backoffTimeSeconds);
         if (backoffTimeMillis > 0) {
             // back off because there are connection issues with the apm server
             try {
+                healthy = false;
                 synchronized (WAIT_LOCK) {
                     WAIT_LOCK.wait(backoffTimeMillis + getRandomJitter(backoffTimeMillis));
                 }
             } catch (InterruptedException e) {
                 logger.info("APM Agent ReportingEventHandler had been interrupted", e);
+            } finally {
+                healthy = true;
             }
         }
+    }
+
+    public boolean isHealthy() {
+        return healthy;
     }
 
     public long getReported() {

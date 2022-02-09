@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,12 +15,11 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.log.shipper;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import co.elastic.apm.agent.sdk.logging.Logger;
+import co.elastic.apm.agent.sdk.logging.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
@@ -92,7 +86,7 @@ public class FileTailer implements Runnable {
         for (TailableFile tailableFile : tailableFiles) {
             try {
                 lines += tailableFile.tail(buffer, fileChangeListener, maxLinesPerCycle);
-            } catch (IOException e) {
+            } catch (Exception e) {
                 logger.error(e.getMessage(), e);
             }
         }

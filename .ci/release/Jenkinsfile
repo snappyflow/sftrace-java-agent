@@ -2,7 +2,7 @@
 
 @Library('apm@current') _
 pipeline {
-  agent { label 'linux && immutable' }
+  agent { label 'ubuntu && linux-immutable-docker' }
   environment {
     REPO = 'apm-agent-java'
     BASE_DIR = "src/github.com/elastic/${env.REPO}"
@@ -13,6 +13,9 @@ pipeline {
     HOME = "${env.WORKSPACE}"
     JAVA_HOME = "${env.HUDSON_HOME}/.java/java10"
     PATH = "${env.JAVA_HOME}/bin:${env.PATH}"
+    SLACK_CHANNEL = '#apm-agent-java'
+    NOTIFY_TO = 'build-apm+apm-agent-java@elastic.co'
+    BRANCH_SPECIFIER = "${params.branch_specifier}"
   }
   options {
     timeout(time: 3, unit: 'HOURS')
@@ -20,13 +23,11 @@ pipeline {
     timestamps()
     ansiColor('xterm')
     durabilityHint('PERFORMANCE_OPTIMIZED')
-
   }
   parameters {
-    string(name: 'branch_specifier', defaultValue: 'master')
-    booleanParam(name: 'check_branch_ci_status', defaultValue: true, description: "Check for failing tests in the master branch?")
+    string(name: 'branch_specifier', defaultValue: 'stable', description: "What branch to release from?")
+    booleanParam(name: 'check_branch_ci_status', defaultValue: true, description: "Check for failing tests in the given branch (if no stable branch)?")
   }
-
   stages {
     stage('Initializing'){
       options { skipDefaultCheckout() }
@@ -35,7 +36,7 @@ pipeline {
           steps {
             gitCheckout(
                 basedir: "${BASE_DIR}",
-                branch: 'master',
+                branch: "${BRANCH_SPECIFIER}",
                 repo: 'git@github.com:elastic/apm-agent-java.git',
                 credentialsId: 'f6c7695a-671e-4f4f-a331-acdce44ff9ba',
                 shallow: false
@@ -43,13 +44,16 @@ pipeline {
             dir("${BASE_DIR}") {
               setupAPMGitEmail()
             }
-            stash(allowEmpty: true, name: 'source', useDefaultExcludes: false)
             dir("${BASE_DIR}") {
-              script {
-                env.TAG_BARE = sh(script: "git tag | tail -1", returnStdout: true)
-                env.TAG_VER = sh(script: "git tag | tail -1 | sed s/v//", returnStdout: true)
-                env.TAG_DOT_X = sh(script: 'git tag|tail -1|sed s/v//|cut -f1 -d "."|awk \'{print $1".x"}\'', returnStdout: true)
+              withEnv(["BRANCH_NAME=${BRANCH_SPECIFIER}"]){
+                withGitRelease() { // sets up the git release setup (remote branches, current workspace state, ...)
+                  stash(allowEmpty: true, name: 'source', useDefaultExcludes: false)
+                }
               }
+            }
+            deleteDir()
+            dir("${BASE_DIR}") {
+              unstash 'source'
             }
           }
         }
@@ -71,14 +75,21 @@ pipeline {
             }
           }
         }
-        stage('Check master build status') {
-        when { expression { params.ignore_branch_ci_status } }
-         steps {
-             // If this build is not green: https://apm-ci.elastic.co/job/apm-agent-java/job/apm-agent-java-mbp/job/master/
-             whenTrue(!buildStatus(host: 'apm-ci.elastic.co', job: ['apm-agent-java', 'apm-agent-java-mbp', 'master'], return_boolean: true)) {
-               input(message: "WARNING! The master build is not passing. Do you wish to continue?")
-             }
-         }
+        stage('Check build status') {
+          when {
+            allOf {
+              expression { params.check_branch_ci_status }
+              expression { env.BRANCH_SPECIFIER != 'stable' }
+            }
+          }
+          steps {
+            // If this build is not green: https://apm-ci.elastic.co/job/apm-agent-java/job/apm-agent-java-mbp/job/"${BRANCH_SPECIFIER}"/
+            whenTrue(!buildStatus(host: 'apm-ci.elastic.co', job: ['apm-agent-java', 'apm-agent-java-mbp', "${BRANCH_SPECIFIER}"], return_boolean: true)) {
+              notifyStatus(slackStatus: 'warning', subject: "[${env.REPO}] The ${BRANCH_SPECIFIER} build is not passing",
+                           body: "Please go to (<${env.BUILD_URL}input|here>) to approve or reject within 12 hours.")
+              input(message: "WARNING! The ${BRANCH_SPECIFIER} build is not passing. Do you wish to continue?")
+            }
+          }
         }
         stage('Require confirmation that CHANGELOG.asciidoc has been updated') {
           steps {
@@ -95,77 +106,59 @@ pipeline {
             }
           }
         }
-        stage('Review project version') {
+        stage('Set release version') {
           steps {
             dir("${BASE_DIR}"){
               script {
-                def ver = mvnVersion(showQualifiers: true)
-                def should_continue = input(message: "Current version is ${ver}", parameters: [
-                  [
-                    $class: 'ChoiceParameterDefinition',
-                    name: "You are about to release version ${ver - '-SNAPSHOT'}. Do you wish to update the version?",
-                    "choices": ["Yes", "No"],
-                    description: "Selecting 'Yes' will allow you to select the new version in the next step."
-                  ]
-                ])
-                if (should_continue == 'Yes'){
-                  def new_version = input(message: "Please enter version to change to:", parameters:
-                    [
-                      [
-                        $class: 'StringParameterDefinition',
-                        defaultValue: "${ver}",
-                        description: 'We will update the project version in all pom.xml files. Set this to your desired <release-version>-SNAPSHOT (for example 1.2.3-SNAPSHOT if you want to release version 1.2.3).', name: 'New Version'
-                      ]
-                    ]
-                  )
-                  sh(label: "mavenVersionUpdate", script: "./mvnw --batch-mode release:update-versions -DdevelopmentVersion=${new_version}")
-                  withEnv(["BRANCH_NAME=tags/${env.TAG_BARE}"]){
-                    withGitRelease() {
-                      sh(script: "git commit -a -m 'Version bump'")
-                      gitPush()
-                    }
-                  }
+                def snapshot_version = mvnVersion(showQualifiers: true)
+                def release_version = snapshot_version.minus('-SNAPSHOT')
+                def user_release_version = input(message: "Please enter version to release:", parameters: [[
+                    $class: 'StringParameterDefinition',
+                    name: 'Release version',
+                    defaultValue: "${release_version}",
+                    description: "Current project version is ${snapshot_version}, will be released as ${release_version} if unchanged. Input release version without '-SNAPSHOT' suffix"
+                  ]])
+
+                if( release_version.equals(user_release_version) ) {
+                    echo "changing project version '${snapshot_version}' not required to release ${release_version}"
                 } else {
-                  echo "Skipping version update"
+                    echo "changing project version from '${snapshot_version}' to '${user_release_version}' to prepare release ${user_release_version}."
+                    sh(label: "mavenVersionUpdate", script: "./mvnw --batch-mode release:update-versions -DdevelopmentVersion=${user_release_version}-SNAPSHOT")
+                    sh(script: "git commit -a -m 'Version bump ${user_release_version}'")
+                    gitPush()
                 }
+
+                env.RELEASE_TAG = "v" + user_release_version
+                env.RELEASE_VERSION = user_release_version
+                env.BRANCH_DOT_X = user_release_version.substring(0, user_release_version.indexOf('.'))+'.x'
               }
             }
           }
         }
         stage('Wait on internal CI') {
           steps {
+            notifyStatus(slackStatus: 'warning', subject: "[${env.REPO}] Release ready to be pushed",
+                          body: "Please go to (<${env.BUILD_URL}input|here>) to approve or reject within 12 hours.")
             input(message: "Start the release job on the internal CI. Click 'Proceed' once the job has succeeded or click 'Abort' if the release has failed and then manually undo the release.")
           }
         }
         stage('Nexus release') {
           steps {
-            script {
-              def spid = getVaultSecret('nexus')["staging-profile-id"]
-              dir("${BASE_DIR}"){
-                withEnvMask(vars: [[var: "SPID", password: spid]]){
-                  def foundStagingId = nexusFindStagingId(stagingProfileId: "${SPID}", groupId: "co.elastic.apm")
-                  nexusCloseStagingRepository(stagingProfileId: "${SPID}", stagingId: foundStagingId)
-                  nexusReleaseStagingRepository(stagingProfileId: "${SPID}", stagingId: foundStagingId)
-                }
-              }
-            }
+            notifyStatus(slackStatus: 'warning', subject: "[${env.REPO}] Release ready to be published in Nexus",
+                         body: "Please go to (<https://oss.sonatype.org/|here>) to proceed with the manual nexus release. Login details in LastPass")
+            input(message: "Go to https://oss.sonatype.org and proceed with the steps to close and release the staging artifact.")
           }
         }
-        stage('Branch creation') {
+        stage('Major Branch create/update') {
           steps {
             dir("${BASE_DIR}") {
-              git credentialsId: 'f6c7695a-671e-4f4f-a331-acdce44ff9ba', url: 'git@github.com:elastic/apm-agent-java.git'
-              withEnv(["BRANCH_NAME=tags/${env.TAG_BARE}"]){
-                withGitRelease() {
-                  script {
-                    def curVer = mvnVersion()
-                    sh(script: "./scripts/jenkins/branch_creation.sh ${curVer}")
-                    def isMajor = sh(script: "./scripts/jenkins/is_major.sh ${curVer}", returnStatus: true)
-                    if (isMajor == 0) {
-                      input message: "This was a major version release. Please update the conf.yml in the docs repo before continuing", ok "Continue"
-                    }
-                  }
-                  gitPush()
+              script {
+                sh(script: ".ci/release/update_major_branch.sh ${RELEASE_VERSION}")
+                gitPush(args: "-f ${BRANCH_DOT_X}")
+
+                def isMajor = env.RELEASE_VERSION.endsWith(".0.0")
+                if (isMajor) {
+                  input message: "This was a major version release. Please update the conf.yml in the docs repo before continuing", ok "Continue"
                 }
               }
             }
@@ -173,32 +166,30 @@ pipeline {
         }
         stage('Create GitHub release draft') {
           steps {
-            deleteDir()
-            unstash 'source'
             dir("${BASE_DIR}"){
               script {
-                def curVer = mvnVersion(showQualifiers: false)
                 // Construct the URL with anchor for the release notes
                 // Ex: https://www.elastic.co/guide/en/apm/agent/java/current/release-notes-1.x.html#release-notes-1.13.0
-                def finalUrl = sh(script: "scripts/jenkins/generate_release_notes_url.sh ${curVer}", , returnStdout: true)
-                def ret = githubReleaseCreate(draft: true, name: "Release ${curVer}", body: "[Release Notes for ${curVer}](${finalUrl})")
+                def finalUrl = "https://www.elastic.co/guide/en/apm/agent/java/current/release-notes-${BRANCH_DOT_X}.html#release-notes-${RELEASE_VERSION}"
+                githubEnv()
+                def ret = githubReleaseCreate(
+                        draft: true,
+                        tagName: "${RELEASE_TAG}",
+                        releaseName: "Release ${RELEASE_VERSION}",
+                        body: "[Release Notes for ${RELEASE_VERSION}](${finalUrl})")
                 env.RELEASE_ID = ret['id']
                 env.RELEASE_NOTES_URL = finalUrl
               }
             }
-
           }
         }
         stage('Wait for artifact to be available in Maven Central') {
           steps {
             dir("${BASE_DIR}"){
               script {
-                def fullUrl = sh(script: "./scripts/jenkins/maven_artifact_url.sh ")
-                echo "Sleeping for ten minutes to wait for Sonatype"
-                sleep(time: 10, unit: "MINUTES")
                 waitUntil(initialRecurrencePeriod: 60000) {
                   script {
-                    def ret = sh(script: "curl -fs $fullUrl >/dev/null 2>&1", returnStatus: true)
+                    def ret = sh(script: ".ci/release/wait_maven_artifact_published.sh ${RELEASE_VERSION}", returnStatus: true)
                     echo "Waiting for the artifacts to be published on Sonatype"
                     return ret == 0
                   }
@@ -209,43 +200,60 @@ pipeline {
         }
         stage('Update Cloudfoundry') {
           steps {
-            deleteDir()
-            unstash 'source'
             dir("${BASE_DIR}"){
-              withEnv(["BRANCH_NAME=tags/${env.TAG_BARE}"]){
-                withGitRelease() {
-                  sh(script: "./scripts/jenkins/update_cloudfoundry.sh")
-                  gitPush()
-                }
-              }
+              sh(script: ".ci/release/update_cloudfoundry.sh ${RELEASE_VERSION}")
+              gitPush()
             }
           }
         }
         stage('Publish release on GitHub') {
           steps {
-            waitUntil(initialRecurrencePeriod: 60000) {
-              dir("${BASE_DIR}"){
+            dir("${BASE_DIR}"){
+              waitUntil(initialRecurrencePeriod: 60000) {
                 script {
                   echo "Waiting for the release notes to be available"
-                  def ret = sh(script: "./scripts/jenkins/docs_check.sh $TAG_VER")
-                  return ret == 0
+                    def ret = sh(script: ".ci/release/wait_release_notes_published.sh ${RELEASE_VERSION}", returnStatus: true)
+                    return ret == 0
                 }
               }
+              githubEnv()
+              githubReleasePublish(id: "${env.RELEASE_ID}", name: "Release ${RELEASE_VERSION}")
             }
-            githubReleasePublish(id: "${env.RELEASE_ID}")
           }
         }
         stage('Build and push Docker images') {
           steps {
             dir("${BASE_DIR}"){
-              sh(label: "Build Docker image", script: "./scripts/jenkins/build_docker.sh")
-              // Get Docker registry credentials
-              dockerLogin(secret: "${ELASTIC_DOCKER_SECRET}", registry: 'docker.elastic.co')
-              sh(label: "Push Docker image", script: "./scripts/jenkins/push_docker.sh")
+              // fetch agent artifact from remote repository
+              withEnv(["SONATYPE_FALLBACK=1"]) {
+                sh(label: "Build Docker image", script: "./scripts/jenkins/build_docker.sh")
+                  // Get Docker registry credentials
+                  dockerLogin(secret: "${ELASTIC_DOCKER_SECRET}", registry: 'docker.elastic.co', role_id: 'apm-vault-role-id', secret_id: 'apm-vault-secret-id')
+                  sh(label: "Push Docker image", script: "./scripts/jenkins/push_docker.sh")
+              }
+            }
+          }
+          post {
+            success {
+              notifyStatus(slackStatus: 'good', subject: "[${env.REPO}] Release published", body: "Great news! The release ${env.RELEASE_VERSION} has completed successfully. (<${env.RUN_DISPLAY_URL}|Open>).")
             }
           }
         }
       }
+      post {
+        failure {
+          notifyStatus(slackStatus: 'danger', subject: "[${env.REPO}] Release failed", body: "(<${env.RUN_DISPLAY_URL}|Open>)")
+        }
+      }
     }
   }
+}
+
+def notifyStatus(def args = [:]) {
+  releaseNotification(slackChannel: "${env.SLACK_CHANNEL}",
+                      slackColor: args.slackStatus,
+                      slackCredentialsId: 'jenkins-slack-integration-token',
+                      to: "${env.NOTIFY_TO}",
+                      subject: args.subject,
+                      body: args.body)
 }

@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,7 +15,6 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.configuration;
 
@@ -29,11 +23,12 @@ import co.elastic.apm.agent.context.AbstractLifecycleListener;
 import co.elastic.apm.agent.impl.ElasticApmTracer;
 import co.elastic.apm.agent.impl.stacktrace.StacktraceConfiguration;
 import co.elastic.apm.agent.util.VersionUtils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import co.elastic.apm.agent.sdk.logging.Logger;
+import co.elastic.apm.agent.sdk.logging.LoggerFactory;
 import org.stagemonitor.configuration.ConfigurationOption;
 import org.stagemonitor.configuration.ConfigurationRegistry;
 
+import java.lang.management.ManagementFactory;
 import java.util.List;
 
 /**
@@ -49,12 +44,7 @@ public class StartupInfo extends AbstractLifecycleListener {
     private final String elasticApmVersion;
 
     public StartupInfo() {
-        final String version = VersionUtils.getVersion(getClass(), "co.elastic.apm", "elastic-apm-agent");
-        if (version != null) {
-            elasticApmVersion = version;
-        } else {
-            elasticApmVersion = "(unknown version)";
-        }
+        elasticApmVersion = VersionUtils.getAgentVersion();
     }
 
     private static String getJvmAndOsVersionString() {
@@ -73,7 +63,18 @@ public class StartupInfo extends AbstractLifecycleListener {
 
     void logConfiguration(ConfigurationRegistry configurationRegistry, Logger logger) {
         final String serviceName = configurationRegistry.getConfig(CoreConfiguration.class).getServiceName();
-        logger.info("Starting Elastic APM {} as {} on {}", elasticApmVersion, serviceName, getJvmAndOsVersionString());
+        final String serviceVersion = configurationRegistry.getConfig(CoreConfiguration.class).getServiceVersion();
+
+        StringBuilder serviceNameAndVersion = new StringBuilder(serviceName);
+        if (serviceVersion != null) {
+            serviceNameAndVersion.append(" (").append(serviceVersion).append(")");
+        }
+
+        logger.info("Starting Elastic APM {} as {} on {}",
+            elasticApmVersion,
+            serviceNameAndVersion,
+            getJvmAndOsVersionString());
+        logger.debug("VM Arguments: {}", ManagementFactory.getRuntimeMXBean().getInputArguments());
         for (List<ConfigurationOption<?>> options : configurationRegistry.getConfigurationOptionsByCategory().values()) {
             for (ConfigurationOption<?> option : options) {
                 if (!option.isDefault()) {
@@ -88,7 +89,7 @@ public class StartupInfo extends AbstractLifecycleListener {
     }
 
     private void logConfigWithNonDefaultValue(Logger logger, ConfigurationOption<?> option) {
-        logger.debug("{}: '{}' (source: {})", option.getKey(),
+        logger.info("{}: '{}' (source: {})", option.getKey(),
             option.isSensitive() ? "XXXX" : option.getValueAsSafeString(),
             option.getNameOfCurrentConfigurationSource());
 

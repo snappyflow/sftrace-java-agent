@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,20 +15,25 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.bci;
 
 import co.elastic.apm.agent.bci.classloading.ExternalPluginClassLoader;
 import co.elastic.apm.agent.bci.classloading.IndyPluginClassLoader;
+import co.elastic.apm.agent.bci.classloading.LookupExposer;
+import co.elastic.apm.agent.common.JvmRuntimeInfo;
 import co.elastic.apm.agent.sdk.state.GlobalState;
 import co.elastic.apm.agent.util.PackageScanner;
 import net.bytebuddy.asm.Advice;
+import net.bytebuddy.dynamic.ClassFileLocator;
 import net.bytebuddy.dynamic.loading.ClassInjector;
-import org.slf4j.LoggerFactory;
+import co.elastic.apm.agent.sdk.logging.Logger;
+import co.elastic.apm.agent.sdk.logging.LoggerFactory;
+import org.stagemonitor.configuration.ConfigurationOptionProvider;
 import org.stagemonitor.util.IOUtils;
 
 import javax.annotation.Nullable;
+import java.io.File;
 import java.io.IOException;
 import java.lang.invoke.CallSite;
 import java.lang.invoke.ConstantCallSite;
@@ -42,18 +42,21 @@ import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.lang.reflect.Method;
 import java.net.URISyntaxException;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
+import static net.bytebuddy.matcher.ElementMatchers.hasSuperType;
+import static net.bytebuddy.matcher.ElementMatchers.is;
 import static net.bytebuddy.matcher.ElementMatchers.isAnnotatedWith;
-import static net.bytebuddy.matcher.ElementMatchers.nameStartsWith;
+import static net.bytebuddy.matcher.ElementMatchers.nameContains;
 import static net.bytebuddy.matcher.ElementMatchers.named;
 
 /**
- * When {@link TracerAwareInstrumentation#indyPlugin()} returns {@code true},
- * we instruct Byte Buddy (via {@link Advice.WithCustomMapping#bootstrap(java.lang.reflect.Method)})
+ * We instruct Byte Buddy (via {@link Advice.WithCustomMapping#bootstrap(java.lang.reflect.Method)})
  * to dispatch {@linkplain Advice.OnMethodEnter#inline() non-inlined advices} via an invokedynamic (indy) instruction.
  * The target method is linked to a dynamically created plugin class loader that is specific to an instrumentation plugin
  * and the class loader of the instrumented method.
@@ -63,8 +66,9 @@ import static net.bytebuddy.matcher.ElementMatchers.named;
  * This will also create the plugin class loader.
  * </p>
  * <pre>
- *   Bootstrap CL ←──────────────────────────── Agent CL
- *       ↑ └java.lang.IndyBootstrapDispatcher ─ ↑ ─→ └ {@link IndyBootstrap#bootstrap}
+ *                      {@code co.elastic.apm.agent.premain.ShadedClassLoader}
+ *   Bootstrap CL ←─────Cached Lookup Key────── Agent CL {@code co.elastic.apm.agent.premain.ShadedClassLoader}
+ *       ↑ └java.lang.IndyBootstrapDispatcher ─ ↑ ───→ └ {@link IndyBootstrap#bootstrap}
  *     Ext/Platform CL               ↑          │                        ╷
  *       ↑                           ╷          │                        ↓
  *     System CL                     ╷          │        {@link IndyPluginClassLoaderFactory#getOrCreatePluginClassLoader}
@@ -72,12 +76,15 @@ import static net.bytebuddy.matcher.ElementMatchers.named;
  *     Common               linking of CallSite {@link ExternalPluginClassLoader}
  *     ↑    ↑             (on first invocation) ↑ ├ AdviceClass          ╷
  * WebApp1  WebApp2                  ╷          │ ├ AdviceHelper      creates
- *          ↑ - InstrumentedClass    ╷          │ └ GlobalState          ╷
- *          │                ╷       ╷          │                        ╷
- *          │                INVOKEDYNAMIC      │                        ↓
- *          └────────────────┼──────────────────{@link IndyPluginClassLoader}
+ *          ↑ - InstrumentedClass    ╷          │ ├ GlobalState          ╷
+ *          │                ╷       ╷          │ └ LookupExposer        ╷
+ *          │                INVOKEDYNAMIC      │                        ╷
+ *          └────────────────┼──────────────────{@link co.elastic.apm.agent.bci.classloading.DiscriminatingMultiParentClassLoader}
+ *                           │                  ↑                        ↓
+ *                           │                  {@link IndyPluginClassLoader}
  *                           └╶╶╶╶╶╶╶╶╶╶╶╶╶╶╶╶→ ├ AdviceClass
- *                                              └ AdviceHelper
+ *                                              ├ AdviceHelper
+ *                                              └ LookupExposer
  * Legend:
  *  ╶╶→ method calls
  *  ──→ class loader parent/child relationships
@@ -148,39 +155,68 @@ import static net.bytebuddy.matcher.ElementMatchers.named;
  *     <li>
  *         The {@code INVOKEDYNAMIC} support of early Java 7 versions is not reliable.
  *         That's why we disable the agent on them.
- *         See also {@link AgentMain#isJavaVersionSupported}
+ *         See also {@code co.elastic.apm.agent.premain.JavaVersionBootstrapCheck}
  *     </li>
  *     <li>
  *         There are some things to watch out for when writing plugins,
- *         as explained in {@link TracerAwareInstrumentation#indyPlugin()}
+ *         as explained in {@link co.elastic.apm.agent.sdk.ElasticApmInstrumentation}
  *     </li>
  * </ul>
- * @see TracerAwareInstrumentation#indyPlugin()
+ * @see co.elastic.apm.agent.sdk.ElasticApmInstrumentation
  */
+@SuppressWarnings("JavadocReference")
 public class IndyBootstrap {
 
     /**
-     * Starts with {@code java.lang} so that OSGi class loaders don't restrict access to it
+     * Starts with {@code java.lang} so that OSGi class loaders don't restrict access to it.
+     * This also allows to load it in {@code java.base} module on Java9+ for Hotspot, Open J9 requires {@code ModuleSetter}
      */
     private static final String INDY_BOOTSTRAP_CLASS_NAME = "java.lang.IndyBootstrapDispatcher";
+
     /**
-     * The class file of {@code java.lang.IndyBootstrapDispatcher}.
-     * Ends with {@code clazz} because if it ended with {@code clazz}, it would be loaded like a regular class.
+     * The class file of {@code IndyBootstrapDispatcher}, loaded from classpath resource, {@code esclazz} extension avoids
+     * being loaded as a regular class.
      */
-    private static final String INDY_BOOTSTRAP_RESOURCE = "bootstrap/IndyBootstrapDispatcher.clazz";
+    private static final String INDY_BOOTSTRAP_RESOURCE = "bootstrap/java/lang/IndyBootstrapDispatcher.esclazz";
+
+    /**
+     * Needs to be loaded from the bootstrap CL because it uses {@code sun.misc.Unsafe}.
+     * In addition, needs to be loaded explicitly by name only when running on Java 9, because compiled with Java 9
+     */
+    private static final String INDY_BOOTSTRAP_MODULE_SETTER_CLASS_NAME = "co.elastic.apm.agent.modulesetter.ModuleSetter";
+
+    /**
+     * The class file of {@code ModuleSetter}, loaded from classpath resource, {@code esclazz} extension avoids being
+     * loaded as a regular class.
+     */
+    private static final String INDY_BOOTSTRAP_MODULE_SETTER_RESOURCE = "bootstrap/co/elastic/apm/agent/modulesetter/ModuleSetter.esclazz";
+
+    /**
+     * The name of the class we use as the lookup class during the invokedynamic bootstrap flow. The bytecode of this
+     * class is injected into the plugin class loader, then loaded from that class loader and used as the lookup class
+     * to link the instrumented call site to the advice method.
+     */
+    public static final String LOOKUP_EXPOSER_CLASS_NAME = "co.elastic.apm.agent.bci.classloading.LookupExposer";
+
+    /**
+     * The root package name prefix that all embedded plugins classes should start with
+     */
+    private static final String EMBEDDED_PLUGINS_PACKAGE_PREFIX = "co.elastic.apm.agent.";
+
     /**
      * Caches the names of classes that are defined within a package and it's subpackages
      */
     private static final ConcurrentMap<String, List<String>> classesByPackage = new ConcurrentHashMap<>();
+
     @Nullable
     static Method indyBootstrapMethod;
 
-    public static Method getIndyBootstrapMethod() {
+    public static Method getIndyBootstrapMethod(final Logger logger) {
         if (indyBootstrapMethod != null) {
             return indyBootstrapMethod;
         }
         try {
-            Class<?> indyBootstrapClass = initIndyBootstrap();
+            Class<?> indyBootstrapClass = initIndyBootstrap(logger);
             indyBootstrapClass
                 .getField("bootstrap")
                 .set(null, IndyBootstrap.class.getMethod("bootstrap", MethodHandles.Lookup.class, String.class, MethodType.class, Object[].class));
@@ -193,14 +229,70 @@ public class IndyBootstrap {
     /**
      * Injects the {@code java.lang.IndyBootstrapDispatcher} class into the bootstrap class loader if it wasn't already.
      */
-    private static Class<?> initIndyBootstrap() throws Exception {
-        try {
-            return Class.forName(INDY_BOOTSTRAP_CLASS_NAME, false, null);
-        } catch (ClassNotFoundException e) {
-            byte[] bootstrapClass = IOUtils.readToBytes(ClassLoader.getSystemClassLoader().getResourceAsStream(INDY_BOOTSTRAP_RESOURCE));
-            ClassInjector.UsingUnsafe.ofBootLoader().injectRaw(Collections.singletonMap(INDY_BOOTSTRAP_CLASS_NAME, bootstrapClass));
+    private static Class<?> initIndyBootstrap(final Logger logger) throws Exception {
+        Class<?> indyBootstrapDispatcherClass = loadClassInBootstrap(INDY_BOOTSTRAP_CLASS_NAME, INDY_BOOTSTRAP_RESOURCE);
+
+        if (JvmRuntimeInfo.ofCurrentVM().getMajorVersion() >= 9 && JvmRuntimeInfo.ofCurrentVM().isJ9VM()) {
+            try {
+                logger.info("Overriding IndyBootstrapDispatcher class's module to java.base module. This is required in J9 VMs.");
+                setJavaBaseModule(indyBootstrapDispatcherClass);
+            } catch (Throwable throwable) {
+                logger.warn("Failed to setup proper module for the IndyBootstrapDispatcher class, instrumentation may fail", throwable);
+            }
         }
-        return Class.forName(INDY_BOOTSTRAP_CLASS_NAME, false, null);
+        return indyBootstrapDispatcherClass;
+    }
+
+    /**
+     * Loads a class from classpath resource in bootstrap classloader.
+     * <p>
+     * Ensuring that classes loaded through this method can ONLY be loaded in the bootstrap CL requires the following:
+     * <ul>
+     *     <li>The class bytecode resource name should not end with the {@code .class} suffix</li>
+     *     <li>The class bytecode resource name should be in a location that reflects its package</li>
+     *     <li>For tests in IDE, the class name used here should be distinct from its original class name to ensure
+     *     that only the relocated resource is being used</li>
+     * </ul>
+     *
+     * @param className    class name
+     * @param resourceName class resource name
+     * @return class loaded in bootstrap classloader
+     * @throws IOException            if unable to open provided resource
+     * @throws ClassNotFoundException if unable to load class in bootstrap CL
+     */
+    private static Class<?> loadClassInBootstrap(String className, String resourceName) throws IOException, ClassNotFoundException {
+        Class<?> bootstrapClass;
+        try {
+            // Will return non-null value only if the class has already been loaded.
+            // Ensuring that a class can ONLY be loaded through this method and not from regular classloading relies
+            // on applying the listed instructions in method documentation
+            bootstrapClass = Class.forName(className, false, null);
+        } catch (ClassNotFoundException e) {
+            byte[] classBytes = IOUtils.readToBytes(ElasticApmAgent.getAgentClassLoader().getResourceAsStream(resourceName));
+            if (classBytes == null || classBytes.length == 0) {
+                throw new IllegalStateException("Could not locate " + resourceName);
+            }
+            ClassInjector.UsingUnsafe.ofBootLoader().injectRaw(Collections.singletonMap(className, classBytes));
+            bootstrapClass = Class.forName(className, false, null);
+        }
+        return bootstrapClass;
+    }
+
+
+    /**
+     * A package-private method for unit-testing of the module overriding functionality
+     *
+     * @param targetClass class for which module should be overridden with the {@code java.base} module
+     * @throws Throwable in case of any failure related to module overriding
+     */
+    static void setJavaBaseModule(Class<?> targetClass) throws Throwable {
+        // In order to override the original unnamed module assigned to the IndyBootstrapDispatcher, we rely on the
+        // Unsafe API, which requires the caller to be loaded by the Bootstrap CL
+
+        Class<?> moduleSetterClass = loadClassInBootstrap(INDY_BOOTSTRAP_MODULE_SETTER_CLASS_NAME, INDY_BOOTSTRAP_MODULE_SETTER_RESOURCE);
+        MethodHandles.lookup()
+            .findStatic(moduleSetterClass, "setJavaBaseModule", MethodType.methodType(void.class, Class.class))
+            .invoke(targetClass);
     }
 
     /**
@@ -250,7 +342,7 @@ public class IndyBootstrap {
      * @param adviceMethodType A {@link java.lang.invoke.MethodType} representing the arguments and return type of the advice method.
      * @param args             Additional arguments that are provided by Byte Buddy:
      *                         <ul>
-     *                           <li>A {@link String} of the binary target class name.</li>
+     *                           <li>A {@link String} of the binary advice class name.</li>
      *                           <li>A {@link int} with value {@code 0} for an enter advice and {code 1} for an exist advice.</li>
      *                           <li>A {@link Class} representing the class implementing the instrumented method.</li>
      *                           <li>A {@link String} with the name of the instrumented method.</li>
@@ -270,23 +362,50 @@ public class IndyBootstrap {
             String instrumentedMethodName = (String) args[3];
             MethodHandle instrumentedMethod = args.length >= 5 ? (MethodHandle) args[4] : null;
 
-            ClassLoader adviceClassLoader = ElasticApmAgent.getClassLoader(adviceClassName);
-            List<String> pluginClasses;
-            if (adviceClassLoader instanceof ExternalPluginClassLoader) {
-                pluginClasses = ((ExternalPluginClassLoader) adviceClassLoader).getClassNames();
+            ClassLoader instrumentationClassLoader = ElasticApmAgent.getInstrumentationClassLoader(adviceClassName);
+            ClassLoader targetClassLoader = lookup.lookupClass().getClassLoader();
+            ClassFileLocator classFileLocator;
+            List<String> pluginClasses = new ArrayList<>();
+            if (instrumentationClassLoader instanceof ExternalPluginClassLoader) {
+                List<String> externalPluginClasses = ((ExternalPluginClassLoader) instrumentationClassLoader).getClassNames();
+                for (String externalPluginClass : externalPluginClasses) {
+                    if (// API classes have no dependencies and don't need to be loaded by an IndyPluginCL
+                        !(externalPluginClass.startsWith("co.elastic.apm.api")) &&
+                        !(externalPluginClass.startsWith("co.elastic.apm.opentracing"))
+                    ) {
+                        pluginClasses.add(externalPluginClass);
+                    }
+                }
+                File agentJarFile = ElasticApmAgent.getAgentJarFile();
+                if (agentJarFile == null) {
+                    throw new IllegalStateException("External plugin cannot be applied - can't find agent jar");
+                }
+                classFileLocator = new ClassFileLocator.Compound(
+                    ClassFileLocator.ForClassLoader.of(instrumentationClassLoader),
+                    ClassFileLocator.ForJarFile.of(agentJarFile)
+                );
             } else {
-                pluginClasses = getClassNamesFromBundledPlugin(adviceClassName, adviceClassLoader);
+                pluginClasses.addAll(getClassNamesFromBundledPlugin(adviceClassName, instrumentationClassLoader));
+                classFileLocator = ClassFileLocator.ForClassLoader.of(instrumentationClassLoader);
             }
+            pluginClasses.add(LOOKUP_EXPOSER_CLASS_NAME);
             ClassLoader pluginClassLoader = IndyPluginClassLoaderFactory.getOrCreatePluginClassLoader(
-                lookup.lookupClass().getClassLoader(),
+                targetClassLoader,
                 pluginClasses,
-                adviceClassLoader,
+                // we provide the instrumentation class loader as the agent class loader, but it could actually be an
+                // ExternalPluginClassLoader, of which parent is the agent class loader, so this works as well.
+                instrumentationClassLoader,
+                classFileLocator,
                 isAnnotatedWith(named(GlobalState.class.getName()))
-                    // no plugin CL necessary as all types are available form bootstrap CL
-                    // also, this plugin is used as a dependency in other plugins
-                    .or(nameStartsWith("co.elastic.apm.agent.concurrent")));
+                    // if config classes would be loaded from the plugin CL,
+                    // tracer.getConfig(Config.class) would return null when called from an advice as the classes are not the same
+                    .or(nameContains("Config").and(hasSuperType(is(ConfigurationOptionProvider.class)))));
             Class<?> adviceInPluginCL = pluginClassLoader.loadClass(adviceClassName);
-            MethodHandle methodHandle = MethodHandles.lookup().findStatic(adviceInPluginCL, adviceMethodName, adviceMethodType);
+            Class<LookupExposer> lookupExposer = (Class<LookupExposer>) pluginClassLoader.loadClass(LOOKUP_EXPOSER_CLASS_NAME);
+            // can't use MethodHandle.lookup(), see also https://github.com/elastic/apm-agent-java/issues/1450
+            MethodHandles.Lookup indyLookup = (MethodHandles.Lookup) lookupExposer.getMethod("getLookup").invoke(null);
+            // When calling findStatic now, the lookup class will be one that is loaded by the plugin class loader
+            MethodHandle methodHandle = indyLookup.findStatic(adviceInPluginCL, adviceMethodName, adviceMethodType);
             return new ConstantCallSite(methodHandle);
         } catch (Exception e) {
             // must not be a static field as it would initialize logging before it's ready
@@ -296,12 +415,19 @@ public class IndyBootstrap {
     }
 
     private static List<String> getClassNamesFromBundledPlugin(String adviceClassName, ClassLoader adviceClassLoader) throws IOException, URISyntaxException {
-        List<String> pluginClasses;
-        String packageName = adviceClassName.substring(0, adviceClassName.lastIndexOf('.'));
-        pluginClasses = classesByPackage.get(packageName);
+        if (!adviceClassName.startsWith(EMBEDDED_PLUGINS_PACKAGE_PREFIX)) {
+            throw new IllegalArgumentException("invalid advice class location : " + adviceClassName);
+        }
+        String pluginPackage = adviceClassName.substring(0, adviceClassName.indexOf('.', EMBEDDED_PLUGINS_PACKAGE_PREFIX.length()));
+        List<String> pluginClasses = classesByPackage.get(pluginPackage);
         if (pluginClasses == null) {
-            classesByPackage.putIfAbsent(packageName, PackageScanner.getClassNames(packageName, adviceClassLoader));
-            pluginClasses = classesByPackage.get(packageName);
+            pluginClasses = new ArrayList<>();
+            Collection<String> pluginClassLoaderRootPackages = ElasticApmAgent.getPluginClassLoaderRootPackages(pluginPackage);
+            for (String pkg : pluginClassLoaderRootPackages) {
+                pluginClasses.addAll(PackageScanner.getClassNames(pkg, adviceClassLoader));
+            }
+            classesByPackage.putIfAbsent(pluginPackage, pluginClasses);
+            pluginClasses = classesByPackage.get(pluginPackage);
         }
         return pluginClasses;
     }

@@ -1,7 +1,0 @@
-co.elastic.apm.agent.hibernate.SessionInstrumentation$ReadObjectsInstrumentation
-co.elastic.apm.agent.hibernate.SessionInstrumentation$CUDInstrumentation
-co.elastic.apm.agent.hibernate.SessionInstrumentation$SessionCloseInstrumentation
-co.elastic.apm.agent.hibernate.SessionBuilderInstrumentation$SessionOpenInstrumentation
-co.elastic.apm.agent.hibernate.TransactionInstrumentation$BeginInstrumentation
-co.elastic.apm.agent.hibernate.TransactionInstrumentation$CommitInstrumentation
-co.elastic.apm.agent.hibernate.TransactionInstrumentation$RollbackInstrumentation

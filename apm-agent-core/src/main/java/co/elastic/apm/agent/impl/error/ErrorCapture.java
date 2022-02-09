@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,7 +15,6 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.impl.error;
 
@@ -35,8 +29,8 @@ import co.elastic.apm.agent.impl.transaction.TraceContext;
 import co.elastic.apm.agent.impl.transaction.Transaction;
 import co.elastic.apm.agent.matcher.WildcardMatcher;
 import co.elastic.apm.agent.objectpool.Recyclable;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import co.elastic.apm.agent.sdk.logging.Logger;
+import co.elastic.apm.agent.sdk.logging.LoggerFactory;
 
 import javax.annotation.Nullable;
 import java.util.Collection;
@@ -134,6 +128,12 @@ public class ErrorCapture implements Recyclable {
      */
     public ErrorCapture asChildOf(AbstractSpan<?> parent) {
         this.traceContext.asChildOf(parent.getTraceContext());
+        if (traceContext.getTraceId().isEmpty()) {
+            logger.debug("Creating an Error as child of {} with a null trace_id", parent.getNameAsString());
+            if (logger.isTraceEnabled()) {
+                logger.trace("Stack trace related to Error capture: ", new Throwable());
+            }
+        }
         if (parent instanceof Transaction) {
             Transaction transaction = (Transaction) parent;
             // The error might have occurred in a different thread than the one the transaction was recorded
@@ -239,6 +239,10 @@ public class ErrorCapture implements Recyclable {
          */
         private boolean isSampled;
         /**
+         * The related TransactionInfo name
+         */
+        private StringBuilder name = new StringBuilder();
+        /**
          * The related TransactionInfo type
          */
         @Nullable
@@ -247,11 +251,16 @@ public class ErrorCapture implements Recyclable {
         @Override
         public void resetState() {
             isSampled = false;
+            name.setLength(0);
             type = null;
         }
 
         public boolean isSampled() {
             return isSampled;
+        }
+
+        public StringBuilder getName() {
+            return name;
         }
 
         @Nullable
@@ -266,6 +275,11 @@ public class ErrorCapture implements Recyclable {
 
     public void setTransactionSampled(boolean transactionSampled) {
         transactionInfo.isSampled = transactionSampled;
+    }
+
+    public void setTransactionName(@Nullable StringBuilder name) {
+        transactionInfo.name.setLength(0);
+        transactionInfo.name.append(name);
     }
 
     public void setTransactionType(@Nullable String type) {

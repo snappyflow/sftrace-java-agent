@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,13 +15,12 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.objectpool.impl;
 
 import co.elastic.apm.agent.objectpool.ObjectPool;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import co.elastic.apm.agent.sdk.logging.Logger;
+import co.elastic.apm.agent.sdk.logging.LoggerFactory;
 
 import java.util.Collection;
 import java.util.Collections;
@@ -49,14 +43,6 @@ public class BookkeeperObjectPool<T> implements ObjectPool<T> {
     // An ever-increasing counter for how many objects where requested from the pool
     private AtomicInteger objectCounter = new AtomicInteger();
 
-    static {
-        boolean isTest = false;
-        assert isTest = true;
-        if (!isTest) {
-            throw new IllegalStateException("this object pool should not be used outside tests");
-        }
-    }
-
     /**
      * @param pool pool to wrap
      */
@@ -77,11 +63,11 @@ public class BookkeeperObjectPool<T> implements ObjectPool<T> {
     public void recycle(T obj) {
         logger.debug("recycling pooled object: " + obj);
 
-        if (!toReturn.contains(obj)) {
+        boolean returned = toReturn.remove(obj);
+        if (!returned) {
             throw new IllegalStateException("trying to recycle object that has not been taken from this pool or has already been returned " + obj);
         }
         pool.recycle(obj);
-        toReturn.remove(obj);
     }
 
     @Override

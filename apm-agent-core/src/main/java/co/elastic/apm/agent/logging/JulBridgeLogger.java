@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -11,21 +6,20 @@
  * the Apache License, Version 2.0 (the "License"); you may
  * not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *   http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.logging;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import co.elastic.apm.agent.sdk.logging.Logger;
+import co.elastic.apm.agent.sdk.logging.LoggerFactory;
 
 import java.util.ResourceBundle;
 import java.util.logging.Filter;
@@ -55,7 +49,7 @@ import static java.util.logging.Level.WARNING;
  * <p>
  * The approach we take is to mimic the public interface of {@link java.util.logging.Logger} and use the maven shadow plugin to replace the
  * usage of {@link java.util.logging.Logger} in our dependencies with this class.
- * This class then forwards the logger calls to a slf4j {@link org.slf4j.Logger}.
+ * This class then forwards the logger calls to a {@link co.elastic.apm.agent.sdk.logging.Logger}.
  * </p>
  */
 public class JulBridgeLogger {

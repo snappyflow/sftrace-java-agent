@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,7 +15,6 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.mdc;
 
@@ -31,8 +25,8 @@ import co.elastic.apm.agent.impl.error.ErrorCapture;
 import co.elastic.apm.agent.impl.transaction.AbstractSpan;
 import co.elastic.apm.agent.impl.transaction.TraceContext;
 import co.elastic.apm.agent.logging.LoggingConfiguration;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import co.elastic.apm.agent.sdk.logging.Logger;
+import co.elastic.apm.agent.sdk.logging.LoggerFactory;
 
 import javax.annotation.Nullable;
 import java.lang.invoke.MethodHandle;
@@ -41,10 +35,13 @@ import java.lang.invoke.MethodType;
 
 public class MdcActivationListener implements ActivationListener {
 
-    // prevents the shade plugin from relocating org.slf4j.MDC to co.elastic.apm.agent.shaded.slf4j.MDC
-    private static final String SLF4J_MDC = "org!slf4j!MDC".replace('!', '.');
+    private static final String SLF4J_MDC = "org.slf4j.MDC";
+
     private static final String LOG4J_MDC = "org.apache.log4j.MDC";
+
     private static final String LOG4J2_MDC = "org.apache.logging.log4j.ThreadContext";
+
+    private static final String JBOSS_LOGGING_MDC = "org.jboss.logging.MDC";
 
     private static final String TRACE_ID = "trace.id";
     private static final String TRANSACTION_ID = "transaction.id";
@@ -93,6 +90,19 @@ public class MdcActivationListener implements ActivationListener {
                     return NOOP;
                 }
             }
+        }),
+        new WeakKeySoftValueLoadingCache<>(new WeakKeySoftValueLoadingCache.ValueSupplier<ClassLoader, MethodHandle>() {
+            @Nullable
+            @Override
+            public MethodHandle get(ClassLoader classLoader) {
+                try {
+                    return MethodHandles.lookup()
+                        .findStatic(classLoader.loadClass(JBOSS_LOGGING_MDC), "put", MethodType.methodType(Object.class, String.class, Object.class));
+                } catch (Exception e) {
+                    logger.debug("Class loader " + classLoader + " cannot load JBoss Logging API", e);
+                    return NOOP;
+                }
+            }
         })
     };
 
@@ -130,6 +140,19 @@ public class MdcActivationListener implements ActivationListener {
                 try {
                     return MethodHandles.lookup()
                         .findStatic(classLoader.loadClass(LOG4J2_MDC), "remove", MethodType.methodType(void.class, String.class));
+                } catch (Exception ignore) {
+                    // No need to log - logged already when populated the put cache
+                    return NOOP;
+                }
+            }
+        }),
+        new WeakKeySoftValueLoadingCache<>(new WeakKeySoftValueLoadingCache.ValueSupplier<ClassLoader, MethodHandle>() {
+            @Nullable
+            @Override
+            public MethodHandle get(ClassLoader classLoader) {
+                try {
+                    return MethodHandles.lookup()
+                        .findStatic(classLoader.loadClass(JBOSS_LOGGING_MDC), "remove", MethodType.methodType(void.class, String.class));
                 } catch (Exception ignore) {
                     // No need to log - logged already when populated the put cache
                     return NOOP;

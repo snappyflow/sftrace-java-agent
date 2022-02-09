@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,19 +15,19 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.process;
 
 import co.elastic.apm.agent.AbstractInstrumentationTest;
 import co.elastic.apm.agent.TransactionUtils;
+import co.elastic.apm.agent.impl.transaction.Outcome;
 import co.elastic.apm.agent.impl.transaction.Span;
 import co.elastic.apm.agent.impl.transaction.Transaction;
-import com.blogspot.mydailyjava.weaklockfree.WeakConcurrentMap;
+import co.elastic.apm.agent.sdk.weakconcurrent.WeakConcurrent;
+import co.elastic.apm.agent.sdk.weakconcurrent.WeakMap;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import javax.annotation.Nullable;
 import java.nio.file.Paths;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -51,10 +46,9 @@ class ProcessHelperTest extends AbstractInstrumentationTest {
     // of this instrumentation is. Also, integration test cover this feature for the general case with a packaged
     // agent and thus they don't have such limitation
 
-    @Nullable
-    private Transaction transaction = null;
+    private Transaction transaction;
 
-    private WeakConcurrentMap<Process, Span> storageMap;
+    private WeakMap<Process, Span> storageMap;
     private ProcessHelper helper;
 
     @BeforeEach
@@ -62,7 +56,7 @@ class ProcessHelperTest extends AbstractInstrumentationTest {
         transaction = new Transaction(tracer);
         TransactionUtils.fillTransaction(transaction);
 
-        storageMap = new WeakConcurrentMap.WithInlinedExpunction<>();
+        storageMap = WeakConcurrent.buildMap();
         helper = new ProcessHelper(storageMap);
     }
 
@@ -77,13 +71,13 @@ class ProcessHelperTest extends AbstractInstrumentationTest {
 
         helper.doEndProcess(process, true);
 
-        assertThat(reporter.getSpans()).hasSize(1);
-        Span span = reporter.getSpans().get(0);
+        Span span = getFirstSpan();
 
         assertThat(span.getNameAsString()).isEqualTo(binaryName);
         assertThat(span.getType()).isEqualTo("process");
-        assertThat(span.getSubtype()).isEqualTo(binaryName);
-        assertThat(span.getAction()).isEqualTo("execute");
+        assertThat(span.getSubtype()).isNull();
+        assertThat(span.getAction()).isNull();
+        assertThat(span.getOutcome()).isEqualTo(Outcome.SUCCESS);
     }
 
     @Test
@@ -111,6 +105,42 @@ class ProcessHelperTest extends AbstractInstrumentationTest {
 
         // this second call should be ignored, thus exception not reported
         helper.doEndProcess(process, true);
+
+        assertThat(reporter.getSpans()).hasSize(1);
+        assertThat(reporter.getErrors())
+            .describedAs("error should not be reported")
+            .isEmpty();
+    }
+
+    @Test
+    void endProcessAfterEndSpanShouldBeIgnored() {
+        Process process = mock(Process.class);
+
+        helper.doStartProcess(transaction, process, "hello");
+        assertThat(storageMap).isNotEmpty();
+
+        helper.doEndProcessSpan(process, 0);
+
+        // this second call should be ignored, thus exception not reported
+        helper.doEndProcess(process, true);
+
+        assertThat(reporter.getSpans()).hasSize(1);
+        assertThat(reporter.getErrors())
+            .describedAs("error should not be reported")
+            .isEmpty();
+    }
+
+    @Test
+    void endSpanAfterEndProcessShouldBeIgnored() {
+        Process process = mock(Process.class);
+
+        helper.doStartProcess(transaction, process, "hello");
+        assertThat(storageMap).isNotEmpty();
+
+        helper.doEndProcess(process, true);
+
+        // this second call should be ignored, thus exception not reported
+        helper.doEndProcessSpan(process, 0);
 
         assertThat(reporter.getSpans()).hasSize(1);
         assertThat(reporter.getErrors())
@@ -168,6 +198,9 @@ class ProcessHelperTest extends AbstractInstrumentationTest {
 
         helper.doEndProcess(process, true);
         assertThat(storageMap).isEmpty();
+
+        Span span = getFirstSpan();
+        assertThat(span.getOutcome()).isEqualTo(Outcome.SUCCESS);
     }
 
     @Test
@@ -175,12 +208,22 @@ class ProcessHelperTest extends AbstractInstrumentationTest {
         Process process = mock(Process.class);
         verifyNoMoreInteractions(process); // we should not even use any method of process
 
+        // we have to opt-in to allow unknown outcome
+        reporter.disableCheckUnknownOutcome();
+
         helper.doStartProcess(transaction, process, "hello");
 
         helper.doEndProcess(process, false);
         assertThat(storageMap)
             .describedAs("process span should be marked as terminated")
             .isEmpty();
+
+        assertThat(getFirstSpan().getOutcome()).isEqualTo(Outcome.UNKNOWN);
+    }
+
+    private Span getFirstSpan() {
+        assertThat(reporter.getSpans()).hasSize(1);
+        return reporter.getSpans().get(0);
     }
 
 }

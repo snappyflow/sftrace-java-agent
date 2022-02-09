@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,12 +15,13 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.util;
 
 import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.Test;
+
+import java.io.File;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -36,6 +32,9 @@ class VersionUtilsTest {
         assertThat(VersionUtils.getVersionFromPackage(Test.class)).isNotEmpty();
         assertThat(VersionUtils.getVersionFromPackage(Test.class))
             .isEqualTo(VersionUtils.getVersion(Test.class, "org.junit.jupiter", "junit-jupiter-api"));
+        assertThat(VersionUtils.getManifestEntry(new File(Test.class.getProtectionDomain().getCodeSource().getLocation().getFile()), "Implementation-Version"))
+            .isEqualTo(VersionUtils.getVersionFromPackage(Test.class));
+
         // tests caching
         assertThat(VersionUtils.getVersion(Test.class, "org.junit.jupiter", "junit-jupiter-api"))
             .isSameAs(VersionUtils.getVersion(Test.class, "org.junit.jupiter", "junit-jupiter-api"));

@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,24 +15,26 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.http.client;
 
-import co.elastic.apm.agent.bci.VisibleForAdvice;
 import co.elastic.apm.agent.impl.context.Destination;
 import co.elastic.apm.agent.impl.transaction.AbstractSpan;
 import co.elastic.apm.agent.impl.transaction.Span;
+import co.elastic.apm.agent.sdk.logging.Logger;
+import co.elastic.apm.agent.sdk.logging.LoggerFactory;
 
 import javax.annotation.Nullable;
 import java.net.URI;
 
 public class HttpClientHelper {
+
+    private static final Logger logger = LoggerFactory.getLogger(HttpClientHelper.class);
+
     public static final String EXTERNAL_TYPE = "external";
     public static final String HTTP_SUBTYPE = "http";
 
     @Nullable
-    @VisibleForAdvice
     public static Span startHttpClientSpan(AbstractSpan<?> parent, String method, @Nullable URI uri, @Nullable CharSequence hostName) {
         String uriString = null;
         String scheme = null;
@@ -54,7 +51,6 @@ public class HttpClientHelper {
     }
 
     @Nullable
-    @VisibleForAdvice
     public static Span startHttpClientSpan(AbstractSpan<?> parent, String method, @Nullable String uri,
                                            String scheme, CharSequence hostName, int port) {
         Span span = parent.createExitSpan();
@@ -63,15 +59,18 @@ public class HttpClientHelper {
                 .withSubtype(HTTP_SUBTYPE)
                 .appendToName(method).appendToName(" ").appendToName(hostName);
 
-            if (uri != null) {
-                span.getContext().getHttp().withUrl(uri);
-            }
+            span.getContext().getHttp()
+                .withUrl(uri)
+                .withMethod(method);
+
             setDestinationServiceDetails(span, scheme, hostName, port);
+        }
+        if (logger.isTraceEnabled()) {
+            logger.trace("Created an HTTP exit span: {} for URI: {}. Parent span: {}", span, uri, parent);
         }
         return span;
     }
 
-    @VisibleForAdvice
     public static void setDestinationServiceDetails(Span span, @Nullable String scheme, @Nullable CharSequence host, int port) {
         if (scheme == null || host == null || host.length() == 0) {
             return;

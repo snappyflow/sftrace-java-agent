@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,7 +15,6 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.servlet;
 
@@ -28,6 +22,9 @@ import net.bytebuddy.description.NamedElement;
 import net.bytebuddy.description.method.MethodDescription;
 import net.bytebuddy.description.type.TypeDescription;
 import net.bytebuddy.matcher.ElementMatcher;
+
+import java.util.Arrays;
+import java.util.Collection;
 
 import static net.bytebuddy.matcher.ElementMatchers.hasSuperType;
 import static net.bytebuddy.matcher.ElementMatchers.isInterface;
@@ -46,9 +43,12 @@ import static net.bytebuddy.matcher.ElementMatchers.takesArgument;
  * this makes sure to record a transaction in that case.
  * </p>
  */
-public class ServletInstrumentation extends AbstractServletInstrumentation {
+public abstract class ServletInstrumentation extends AbstractServletInstrumentation {
 
-    static final String SERVLET_API = "servlet-api";
+    @Override
+    public Collection<String> getInstrumentationGroupNames() {
+        return Arrays.asList(Constants.SERVLET_API, Constants.SERVLET_API_DISPATCH);
+    }
 
     @Override
     public ElementMatcher<? super NamedElement> getTypeMatcherPreFilter() {
@@ -57,20 +57,20 @@ public class ServletInstrumentation extends AbstractServletInstrumentation {
 
     @Override
     public ElementMatcher<? super TypeDescription> getTypeMatcher() {
-        return not(isInterface())
-            .and(hasSuperType(named("javax.servlet.Servlet")));
+        return not(isInterface()).and(hasSuperType(named(getServletClassName())));
     }
 
     @Override
     public ElementMatcher<? super MethodDescription> getMethodMatcher() {
         return named("service")
-            .and(takesArgument(0, named("javax.servlet.ServletRequest")))
-            .and(takesArgument(1, named("javax.servlet.ServletResponse")));
+            .and(takesArgument(0, named(doFilterFirstArgumentClassName())))
+            .and(takesArgument(1, named(doFilterSecondArgumentClassName())));
     }
 
-    @Override
-    public Class<?> getAdviceClass() {
-        return ServletApiAdvice.class;
-    }
+    public abstract String getServletClassName();
+
+    abstract String doFilterFirstArgumentClassName();
+
+    abstract String doFilterSecondArgumentClassName();
 
 }

@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,7 +15,6 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.log.shipper;
 
@@ -34,9 +28,9 @@ import co.elastic.apm.agent.report.ApmServerClient;
 import co.elastic.apm.agent.report.ReporterConfiguration;
 import co.elastic.apm.agent.report.serialize.DslJsonSerializer;
 import co.elastic.apm.agent.util.ExecutorUtils;
-import co.elastic.apm.agent.util.ThreadUtils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import co.elastic.apm.agent.common.ThreadUtils;
+import co.elastic.apm.agent.sdk.logging.Logger;
+import co.elastic.apm.agent.sdk.logging.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
@@ -54,9 +48,9 @@ public class LogShipperFactory extends AbstractLifecycleListener {
 
     public LogShipperFactory(ElasticApmTracer tracer) {
         ApmServerClient apmServerClient = tracer.getApmServerClient();
-        DslJsonSerializer serializer = new DslJsonSerializer(tracer.getConfig(StacktraceConfiguration.class), apmServerClient);
-        ApmServerLogShipper logShipper = new ApmServerLogShipper(apmServerClient, tracer.getConfig(ReporterConfiguration.class), tracer.getMetaData(), serializer);
-        ExecutorUtils.NamedThreadFactory threadFactory = new ExecutorUtils.NamedThreadFactory(ThreadUtils.addElasticApmThreadPrefix("log-shipper"));
+        DslJsonSerializer serializer = new DslJsonSerializer(tracer.getConfig(StacktraceConfiguration.class), apmServerClient, tracer.getMetaDataFuture());
+        ApmServerLogShipper logShipper = new ApmServerLogShipper(apmServerClient, tracer.getConfig(ReporterConfiguration.class), serializer);
+        ExecutorUtils.SingleNamedThreadFactory threadFactory = new ExecutorUtils.SingleNamedThreadFactory(ThreadUtils.addElasticApmThreadPrefix("log-shipper"));
         fileTailer = new FileTailer(logShipper, BUFFER_SIZE, MAX_LINES_PER_CYCLE, IDLE_TIME_MS, threadFactory);
     }
 
@@ -72,7 +66,7 @@ public class LogShipperFactory extends AbstractLifecycleListener {
             return;
         }
         if (logFile.equals(LoggingConfiguration.SYSTEM_OUT)) {
-            TailableFile tailableFile = fileTailer.tailFile(Log4j2ConfigurationFactory.getTempLogFile(tracer.getMetaData().getService().getAgent().getEphemeralId()));
+            TailableFile tailableFile = fileTailer.tailFile(Log4j2ConfigurationFactory.getTempLogFile(tracer.getEphemeralId()));
             logger.debug("Tailing temp agent log file {}", tailableFile);
             tailableFile.deleteStateFileOnExit();
             fileTailer.start();

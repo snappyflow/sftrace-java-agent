@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,7 +15,6 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.impl.transaction;
 
@@ -32,8 +26,8 @@ import co.elastic.apm.agent.impl.context.AbstractContext;
 import co.elastic.apm.agent.matcher.WildcardMatcher;
 import co.elastic.apm.agent.objectpool.Recyclable;
 import co.elastic.apm.agent.report.ReporterConfiguration;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import co.elastic.apm.agent.sdk.logging.Logger;
+import co.elastic.apm.agent.sdk.logging.LoggerFactory;
 
 import javax.annotation.Nullable;
 import java.util.concurrent.TimeUnit;
@@ -94,7 +88,22 @@ public abstract class AbstractSpan<T extends AbstractSpan<T>> implements Recycla
      * </pre>
      */
     @Nullable
+    @SuppressWarnings("JavadocReference") // for link to TraceContext#parentId
     private LongList childIds;
+
+    /**
+     * outcome set by span/transaction instrumentation
+     */
+    @Nullable
+    private Outcome outcome;
+
+    /**
+     * outcome set by user explicitly
+     */
+    @Nullable
+    private Outcome userOutcome = null;
+
+    private boolean hasCapturedExceptions;
 
     public int getReferenceCount() {
         return references.get();
@@ -194,6 +203,10 @@ public abstract class AbstractSpan<T extends AbstractSpan<T>> implements Recycla
         return references.get() > 0;
     }
 
+    public boolean isFinished() {
+        return finished;
+    }
+
     /**
      * How long the transaction took to complete, in µs
      */
@@ -253,9 +266,24 @@ public abstract class AbstractSpan<T extends AbstractSpan<T>> implements Recycla
     }
 
     /**
+     * Updates the name of this span to {@code ClassName#methodName}.
+     *
+     * @param clazz      the class that should be part of this span's name
+     * @param methodName the method that should be part of this span's name
+     */
+    public void updateName(Class<?> clazz, String methodName) {
+        StringBuilder spanName = getAndOverrideName(PRIO_DEFAULT);
+        if (spanName != null) {
+            String className = clazz.getName();
+            spanName.append(className, className.lastIndexOf('.') + 1, className.length());
+            spanName.append("#").append(methodName);
+        }
+    }
+
+    /**
      * Only intended for testing purposes as this allocates a {@link String}
      *
-     * @return
+     * @return name
      */
     public String getNameAsString() {
         return name.toString();
@@ -325,6 +353,9 @@ public abstract class AbstractSpan<T extends AbstractSpan<T>> implements Recycla
         discardRequested = false;
         isExit = false;
         childIds = null;
+        outcome = null;
+        userOutcome = null;
+        hasCapturedExceptions = false;
     }
 
     public Span createSpan() {
@@ -359,21 +390,29 @@ public abstract class AbstractSpan<T extends AbstractSpan<T>> implements Recycla
         return isExit;
     }
 
-
-    public void captureException(long epochMicros, Throwable t) {
-        tracer.captureAndReportException(epochMicros, t, this);
+    @Nullable
+    public String captureExceptionAndGetErrorId(long epochMicros, @Nullable Throwable t) {
+        if (t != null) {
+            hasCapturedExceptions = true;
+            return tracer.captureAndReportException(epochMicros, t, this);
+        }
+        return null;
     }
 
     public T captureException(@Nullable Throwable t) {
         if (t != null) {
-            captureException(getTraceContext().getClock().getEpochMicros(), t);
+            captureExceptionAndGetErrorId(getTraceContext().getClock().getEpochMicros(), t);
         }
         return (T) this;
     }
 
+    public void endExceptionally(@Nullable Throwable t) {
+        captureException(t).end();
+    }
+
     @Nullable
     public String captureExceptionAndGetErrorId(@Nullable Throwable t) {
-        return tracer.captureAndReportException(getTraceContext().getClock().getEpochMicros(), t, this);
+        return captureExceptionAndGetErrorId(getTraceContext().getClock().getEpochMicros(), t);
     }
 
     public void addLabel(String key, String value) {
@@ -424,6 +463,20 @@ public abstract class AbstractSpan<T extends AbstractSpan<T>> implements Recycla
             logger.warn("End has already been called: {}", this);
             assert false;
         }
+    }
+
+    /**
+     * @return true if outcome has NOT been set, either by user or through instrumentation
+     */
+    protected boolean outcomeNotSet() {
+        return userOutcome == null && outcome == null;
+    }
+
+    /**
+     * @return true if an exception has been captured
+     */
+    protected boolean hasCapturedExceptions() {
+        return hasCapturedExceptions;
     }
 
     protected abstract void beforeEnd(long epochMicros);
@@ -580,4 +633,37 @@ public abstract class AbstractSpan<T extends AbstractSpan<T>> implements Recycla
     }
 
     protected abstract T thiz();
+
+    /**
+     * @return user outcome if set, otherwise outcome value
+     */
+    public Outcome getOutcome() {
+        if (userOutcome != null) {
+            return userOutcome;
+        }
+        return outcome != null ? outcome : Outcome.UNKNOWN;
+    }
+
+    /**
+     * Sets outcome
+     *
+     * @param outcome outcome
+     * @return this
+     */
+    public T withOutcome(Outcome outcome) {
+        this.outcome = outcome;
+        return thiz();
+    }
+
+    /**
+     * Sets user outcome, which has priority over outcome set through {@link #withOutcome(Outcome)}
+     *
+     * @param outcome user outcome
+     * @return this
+     */
+    public T withUserOutcome(Outcome outcome) {
+        this.userOutcome = outcome;
+        return thiz();
+    }
+
 }

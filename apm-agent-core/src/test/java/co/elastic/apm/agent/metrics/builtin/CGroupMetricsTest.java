@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,7 +15,6 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.metrics.builtin;
 
@@ -84,7 +78,6 @@ class CGroupMetricsTest {
 
         assertThat(metricRegistry.getGaugeValue("system.process.cgroup.memory.mem.usage.bytes", Labels.EMPTY)).isEqualTo(value);
         assertThat(metricRegistry.getGaugeValue("system.process.cgroup.memory.mem.limit.bytes", Labels.EMPTY)).isEqualTo(Double.valueOf(memLimit));
-        assertThat(metricRegistry.getGaugeValue("system.process.cgroup.memory.stats.inactive_file.bytes", Labels.EMPTY)).isEqualTo(10407936L);
     }
     @ParameterizedTest
     @ValueSource(strings ={
@@ -96,7 +89,9 @@ class CGroupMetricsTest {
         assertThat(cgroupMetrics.applyCgroupRegex(CGroupMetrics.CGROUP1_MOUNT_POINT, split[0])).isEqualTo(split[1]);
 
         cgroupMetrics.bindTo(metricRegistry);
-        assertThat(metricRegistry.getGaugeValue("system.process.cgroup.memory.mem.limit.bytes", Labels.EMPTY)).isEqualTo(Double.NaN);
+        assertThat(metricRegistry.getGaugeValue("system.process.cgroup.memory.mem.limit.bytes", Labels.EMPTY))
+            // Casting to Double is required so that comparison of two Double#NaN will be correct (see Double#equals javadoc for info)
+            .isEqualTo(Double.valueOf(Double.NaN));
     }
 
     @ParameterizedTest
@@ -114,9 +109,10 @@ class CGroupMetricsTest {
         CGroupMetrics cgroupMetrics = createUnlimitedSystemMetrics();
         cgroupMetrics.bindTo(metricRegistry);
 
-        assertThat(metricRegistry.getGaugeValue("system.process.cgroup.memory.mem.limit.bytes", Labels.EMPTY)).isEqualTo(Double.NaN);
+        assertThat(metricRegistry.getGaugeValue("system.process.cgroup.memory.mem.limit.bytes", Labels.EMPTY))
+            // Casting to Double is required so that comparison of two Double#NaN will be correct (see Double#equals javadoc for info)
+            .isEqualTo(Double.valueOf(Double.NaN));
         assertThat(metricRegistry.getGaugeValue("system.process.cgroup.memory.mem.usage.bytes", Labels.EMPTY)).isEqualTo(964778496);
-        assertThat(metricRegistry.getGaugeValue("system.process.cgroup.memory.stats.inactive_file.bytes", Labels.EMPTY)).isEqualTo(10407936L);
     }
 
     @Test
@@ -124,9 +120,10 @@ class CGroupMetricsTest {
         CGroupMetrics cgroupMetrics = createUnlimitedSystemMetrics();
         cgroupMetrics.bindTo(metricRegistry);
 
-        assertThat(metricRegistry.getGaugeValue("system.process.cgroup.memory.mem.limit.bytes", Labels.EMPTY)).isEqualTo(Double.NaN);
+        assertThat(metricRegistry.getGaugeValue("system.process.cgroup.memory.mem.limit.bytes", Labels.EMPTY))
+        // Casting to Double is required so that comparison of two Double#NaN will be correct (see Double#equals javadoc for info)
+        .isEqualTo(Double.valueOf(Double.NaN));
         assertThat(metricRegistry.getGaugeValue("system.process.cgroup.memory.mem.usage.bytes", Labels.EMPTY)).isEqualTo(964778496);
-        assertThat(metricRegistry.getGaugeValue("system.process.cgroup.memory.stats.inactive_file.bytes", Labels.EMPTY)).isEqualTo(10407936L);
     }
 
 }

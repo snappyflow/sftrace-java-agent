@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,12 +15,11 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.log.shipper;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import co.elastic.apm.agent.sdk.logging.Logger;
+import co.elastic.apm.agent.sdk.logging.LoggerFactory;
 
 import javax.annotation.Nullable;
 import java.io.Closeable;
@@ -217,7 +211,7 @@ public class TailableFile implements Closeable {
         }
     }
 
-    public int tail(ByteBuffer buffer, FileChangeListener listener, int maxLines) throws IOException {
+    public int tail(ByteBuffer buffer, FileChangeListener listener, int maxLines) throws Exception {
         int readLines = 0;
         while (readLines < maxLines) {
             FileChannel currentFile = getFileChannel();
@@ -229,7 +223,7 @@ public class TailableFile implements Closeable {
         return readLines;
     }
 
-    private int readFile(ByteBuffer buffer, FileChangeListener listener, int maxLines, FileChannel currentFile) throws IOException {
+    private int readFile(ByteBuffer buffer, FileChangeListener listener, int maxLines, FileChannel currentFile) throws Exception {
         int readLines = 0;
         while (readLines < maxLines) {
             buffer.clear();
@@ -285,7 +279,7 @@ public class TailableFile implements Closeable {
         this.fileChannel = fileChannel;
     }
 
-    static int readLines(TailableFile file, ByteBuffer buffer, int maxLines, FileChangeListener listener) throws IOException {
+    static int readLines(TailableFile file, ByteBuffer buffer, int maxLines, FileChangeListener listener) throws Exception {
         int lines = 0;
         while (buffer.hasRemaining() && lines < maxLines) {
             int startPos = buffer.position();

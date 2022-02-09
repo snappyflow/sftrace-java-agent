@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,12 +15,9 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.dubbo;
 
-import co.elastic.apm.agent.dubbo.advice.AlibabaMonitorFilterAdvice;
-import co.elastic.apm.agent.impl.ElasticApmTracer;
 import com.alibaba.dubbo.monitor.support.MonitorFilter;
 import com.alibaba.dubbo.remoting.exchange.ResponseFuture;
 import com.alibaba.dubbo.rpc.Invocation;
@@ -64,10 +56,6 @@ import static net.bytebuddy.matcher.ElementMatchers.takesArgument;
  */
 public class AlibabaMonitorFilterInstrumentation extends AbstractAlibabaDubboInstrumentation {
 
-    public AlibabaMonitorFilterInstrumentation(ElasticApmTracer tracer) {
-        AlibabaMonitorFilterAdvice.init(tracer);
-    }
-
     @Override
     public ElementMatcher<? super TypeDescription> getTypeMatcher() {
         return named("com.alibaba.dubbo.rpc.protocol.dubbo.filter.FutureFilter")
@@ -82,8 +70,8 @@ public class AlibabaMonitorFilterInstrumentation extends AbstractAlibabaDubboIns
     }
 
     @Override
-    public Class<?> getAdviceClass() {
-        return AlibabaMonitorFilterAdvice.class;
+    public String getAdviceClassName() {
+        return "co.elastic.apm.agent.dubbo.advice.AlibabaMonitorFilterAdvice";
     }
 
 }

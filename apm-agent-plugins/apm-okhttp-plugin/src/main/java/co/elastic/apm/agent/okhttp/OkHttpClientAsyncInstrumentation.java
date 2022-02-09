@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,105 +15,89 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.okhttp;
 
-import co.elastic.apm.agent.bci.HelperClassManager;
-import co.elastic.apm.agent.bci.VisibleForAdvice;
 import co.elastic.apm.agent.http.client.HttpClientHelper;
-import co.elastic.apm.agent.impl.ElasticApmTracer;
 import co.elastic.apm.agent.impl.transaction.AbstractSpan;
+import co.elastic.apm.agent.impl.transaction.Outcome;
 import co.elastic.apm.agent.impl.transaction.Span;
-import co.elastic.apm.agent.impl.transaction.TextHeaderSetter;
-import co.elastic.apm.agent.sdk.advice.AssignTo;
+import co.elastic.apm.agent.impl.transaction.TraceContext;
 import com.squareup.okhttp.Call;
 import com.squareup.okhttp.Callback;
 import com.squareup.okhttp.Request;
 import com.squareup.okhttp.Response;
 import net.bytebuddy.asm.Advice;
+import net.bytebuddy.asm.Advice.AssignReturned.ToArguments.ToArgument;
+import net.bytebuddy.asm.Advice.AssignReturned.ToFields.ToField;
 import net.bytebuddy.description.method.MethodDescription;
 import net.bytebuddy.description.type.TypeDescription;
 import net.bytebuddy.matcher.ElementMatcher;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import co.elastic.apm.agent.sdk.logging.Logger;
+import co.elastic.apm.agent.sdk.logging.LoggerFactory;
 
 import javax.annotation.Nullable;
 import java.io.IOException;
 import java.net.URL;
 
+import static net.bytebuddy.implementation.bytecode.assign.Assigner.Typing.DYNAMIC;
 import static net.bytebuddy.matcher.ElementMatchers.named;
 import static net.bytebuddy.matcher.ElementMatchers.returns;
 
 public class OkHttpClientAsyncInstrumentation extends AbstractOkHttpClientInstrumentation {
 
-    @VisibleForAdvice
     public static final Logger logger = LoggerFactory.getLogger(OkHttpClientAsyncInstrumentation.class);
 
     @Override
-    public Class<?> getAdviceClass() {
-        return OkHttpClient3ExecuteAdvice.class;
+    public String getAdviceClassName() {
+        return "co.elastic.apm.agent.okhttp.OkHttpClientAsyncInstrumentation$OkHttpClient3ExecuteAdvice";
     }
 
-    @Nullable
-    @VisibleForAdvice
-    public static HelperClassManager<WrapperCreator<Callback>> callbackWrapperCreator;
-
-    public OkHttpClientAsyncInstrumentation(ElasticApmTracer tracer) {
-        super(tracer);
-        synchronized (OkHttpClientAsyncInstrumentation.class) {
-            if (callbackWrapperCreator == null) {
-                callbackWrapperCreator = HelperClassManager.ForAnyClassLoader.of(tracer,
-                    OkHttpClientAsyncInstrumentation.class.getName() + "$CallbackWrapperCreator",
-                    OkHttpClientAsyncInstrumentation.class.getName() + "$CallbackWrapperCreator$CallbackWrapper");
-            }
-        }
-    }
-
-    @VisibleForAdvice
     public static class OkHttpClient3ExecuteAdvice {
 
-        @AssignTo(
-            fields = @AssignTo.Field(index = 0, value = "originalRequest"),
-            arguments = @AssignTo.Argument(index = 1, value = 0)
-        )
         @Nullable
-        @Advice.OnMethodEnter(suppress = Throwable.class)
+        @Advice.OnMethodEnter(suppress = Throwable.class, inline = false)
+        @Advice.AssignReturned.ToFields(@ToField(index = 0, value = "originalRequest", typing = DYNAMIC))
+        @Advice.AssignReturned.ToArguments(@ToArgument(index = 1, value = 0, typing = DYNAMIC))
         public static Object[] onBeforeEnqueue(final @Advice.Origin Class<? extends Call> clazz,
                                                final @Advice.FieldValue("originalRequest") @Nullable Request originalRequest,
                                                final @Advice.Argument(0) @Nullable Callback originalCallback) {
-            if (tracer.getActive() == null || callbackWrapperCreator == null) {
-                return null;
-            }
-
-            final WrapperCreator<Callback> wrapperCreator = callbackWrapperCreator.getForClassLoaderOfClass(clazz);
-            if (originalRequest == null || originalCallback == null || wrapperCreator == null) {
-                return null;
-            }
 
             final AbstractSpan<?> parent = tracer.getActive();
+            if (parent == null) {
+                return null;
+            }
+
+            if (originalRequest == null || originalCallback == null) {
+                return null;
+            }
 
             Request request = originalRequest;
             Callback callback = originalCallback;
             URL url = request.url();
+
             Span span = HttpClientHelper.startHttpClientSpan(parent, request.method(), url.toString(), url.getProtocol(),
                 OkHttpClientHelper.computeHostName(url.getHost()), url.getPort());
+
             if (span != null) {
                 span.activate();
-                if (headerSetterHelperManager != null) {
-                    TextHeaderSetter<Request.Builder> headerSetter = headerSetterHelperManager.getForClassLoaderOfClass(Request.class);
-                    if (headerSetter != null) {
-                        Request.Builder builder = originalRequest.newBuilder();
-                        span.propagateTraceContext(builder, headerSetter);
-                        request = builder.build();
-                    }
-                }
-                callback = wrapperCreator.wrap(originalCallback, span);
             }
-            return new Object[] {request, callback, span};
+
+            if (!TraceContext.containsTraceContextTextHeaders(request, OkHttpRequestHeaderGetter.INSTANCE)) {
+                Request.Builder builder = originalRequest.newBuilder();
+                if (span != null) {
+                    span.propagateTraceContext(builder, OkHttpRequestHeaderSetter.INSTANCE);
+                    request = builder.build();
+                    callback = CallbackWrapperCreator.INSTANCE.wrap(originalCallback, span);
+                } else {
+                    parent.propagateTraceContext(builder, OkHttpRequestHeaderSetter.INSTANCE);
+                    request = builder.build();
+                }
+            }
+            return new Object[]{request, callback, span};
         }
 
-        @Advice.OnMethodExit(suppress = Throwable.class)
+        @Advice.OnMethodExit(suppress = Throwable.class, inline = false)
         public static void onAfterEnqueue(@Advice.Enter @Nullable Object[] enter) {
             Span span = enter != null ? (Span) enter[2] : null;
             if (span != null) {
@@ -128,6 +107,8 @@ public class OkHttpClientAsyncInstrumentation extends AbstractOkHttpClientInstru
     }
 
     public static class CallbackWrapperCreator implements WrapperCreator<Callback> {
+
+        public static final CallbackWrapperCreator INSTANCE = new CallbackWrapperCreator();
 
         @Override
         public Callback wrap(final Callback delegate, Span span) {
@@ -146,7 +127,9 @@ public class OkHttpClientAsyncInstrumentation extends AbstractOkHttpClientInstru
             @Override
             public void onFailure(Request req, IOException e) {
                 try {
-                    span.captureException(e).end();
+                    span.captureException(e)
+                        .withOutcome(Outcome.FAILURE)
+                        .end();
                 } catch (Throwable t) {
                     logger.error(t.getMessage(), t);
                 } finally {
