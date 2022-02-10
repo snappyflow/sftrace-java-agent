@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,10 +15,10 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.impl;
 
+import co.elastic.apm.agent.configuration.ServiceInfo;
 import co.elastic.apm.agent.impl.error.ErrorCapture;
 import co.elastic.apm.agent.impl.sampling.Sampler;
 import co.elastic.apm.agent.impl.transaction.AbstractSpan;
@@ -46,6 +41,9 @@ public interface Tracer {
      */
     @Nullable
     Transaction startRootTransaction(@Nullable ClassLoader initiatingClassLoader);
+
+    @Nullable
+    Transaction startRootTransaction(@Nullable ClassLoader initiatingClassLoader, long epochMicro);
 
     /**
      * Starts a trace-root transaction with a specified sampler and start timestamp
@@ -73,6 +71,9 @@ public interface Tracer {
      */
     @Nullable
     <C> Transaction startChildTransaction(@Nullable C headerCarrier, TextHeaderGetter<C> textHeadersGetter, @Nullable ClassLoader initiatingClassLoader);
+
+    @Nullable
+    <C> Transaction startChildTransaction(@Nullable C headerCarrier, TextHeaderGetter<C> textHeadersGetter, @Nullable ClassLoader initiatingClassLoader, long epochMicros);
 
     /**
      * Starts a transaction as a child of the context headers obtained through the provided {@link HeaderGetter}.
@@ -153,16 +154,16 @@ public interface Tracer {
     TracerState getState();
 
     /**
-     * Overrides the service name for all {@link Transaction}s,
+     * Overrides the service name and version for all {@link Transaction}s,
      * {@link Span}s and {@link ErrorCapture}s which are created by the service which corresponds to the provided {@link ClassLoader}.
      * <p>
      * The main use case is being able to differentiate between multiple services deployed to the same application server.
      * </p>
      *
      * @param classLoader the class loader which corresponds to a particular service
-     * @param serviceName the service name for this class loader
+     * @param serviceInfo the service name and version for this class loader
      */
-    void overrideServiceNameForClassLoader(@Nullable ClassLoader classLoader, @Nullable String serviceName);
+    void overrideServiceInfoForClassLoader(@Nullable ClassLoader classLoader, ServiceInfo serviceInfo);
 
     /**
      * Called when the container shuts down.
@@ -171,6 +172,9 @@ public interface Tracer {
     void stop();
 
     boolean isRunning();
+
+    @Nullable
+    Span createExitChildSpan();
 
     /**
      * An enumeration used to represent the current tracer state.

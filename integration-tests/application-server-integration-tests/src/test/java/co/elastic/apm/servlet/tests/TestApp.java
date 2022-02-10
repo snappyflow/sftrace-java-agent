@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,13 +15,15 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.servlet.tests;
 
 import co.elastic.apm.servlet.AbstractServletContainerIntegrationTest;
 
 import javax.annotation.Nullable;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Map;
 
 public abstract class TestApp {
 
@@ -35,11 +32,16 @@ public abstract class TestApp {
     private final String statusEndpoint;
     @Nullable
     private final String expectedServiceName;
+    private final String deploymentContext;
+    @Nullable
+    private final String expectedServiceVersion;
 
-    TestApp(String modulePath, String appFileName, String statusEndpoint, @Nullable String expectedServiceName) {
+    TestApp(String modulePath, String appFileName, String deploymentContext, String statusEndpoint, @Nullable String expectedServiceName, @Nullable String expectedVersion) {
         this.modulePath = modulePath;
         this.appFileName = appFileName;
-        this.statusEndpoint = statusEndpoint;
+        this.expectedServiceVersion = expectedVersion;
+        this.statusEndpoint = String.format("/%s/%s", deploymentContext, statusEndpoint);
+        this.deploymentContext = deploymentContext;
         this.expectedServiceName = expectedServiceName;
     }
 
@@ -55,11 +57,46 @@ public abstract class TestApp {
         return statusEndpoint;
     }
 
+    public String getDeploymentContext() {
+        return deploymentContext;
+    }
+
     @Nullable
     public String getExpectedServiceName() {
         return expectedServiceName;
     }
 
+    /**
+     * Provides a way to bind additional files to the container file system
+     *
+     * @return a map of file-paths to designated container-paths
+     */
+    public Map<String, String> getAdditionalFilesToBind() {
+        return Collections.emptyMap();
+    }
+
+    /**
+     * Provides a way for test apps to configure ignored URLs
+     *
+     * @return a collection of URL paths that will be appended to the {@link #getDeploymentContext() app context}
+     */
+    public Collection<String> getPathsToIgnore() {
+        return Collections.emptyList();
+    }
+
+    /**
+     * Provides a way to configure additional environment variables for a specific app
+     *
+     * @return a map of env variable names to values
+     */
+    public Map<String, String> getAdditionalEnvVariables() {
+        return Collections.emptyMap();
+    }
+
     public abstract void test(AbstractServletContainerIntegrationTest test) throws Exception;
 
+    @Nullable
+    public String getExpectedServiceVersion() {
+        return expectedServiceVersion;
+    }
 }

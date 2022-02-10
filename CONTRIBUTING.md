@@ -7,16 +7,23 @@ from writing tutorials or blog posts,
 improving the documentation,
 submitting bug reports and feature requests or writing code.
 
+If you want to be rewarded for your contributions, sign up for the [Elastic Contributor Program](https://www.elastic.co/community/contributor). Each time you make a valid contribution, you’ll earn points that increase your chances of winning prizes and being recognized as a top contributor.
+
 You can get in touch with us through [Discuss](https://discuss.elastic.co/c/apm),
 feedback and ideas are always welcome.
 
 ## Code contributions
 
-If you have a bugfix or new feature that you would like to contribute,
-please find or open an issue about it first.
-Talk about what you would like to do.
-It may be that somebody is already working on it,
-or that there are particular issues that you should know about before implementing the change.
+If you have a bugfix or new feature that you would like to contribute, please do the following:
+- Double check in open issues if there are any related issues or PRs
+- Open an issue, ensure that you have properly described the use-case and possible solutions, link related issues/PRs if any
+- Open a PR and link the issue created in previous step with your code changes.
+
+Doing so allows to:
+- Share knowledge and document a bug/missing feature
+- Get feedback if someone is already working on it or is having a similar issue
+- Benefit from the team experience by discussing it first, there are lots of implementation details that might not be
+obvious at first sight.
 
 Once you are all set to go, [this "cookbook recipe" blog post](https://www.elastic.co/blog/a-cookbook-for-contributing-a-plugin-to-the-elastic-apm-java-agent) can guide you through.
 
@@ -49,7 +56,7 @@ We have some JMH Tests that allow to track the following performance metrics del
 In order to run them, you can use the `ElasticApmActiveContinuousBenchmark` from IDE or command line.
 
 Metrics reported by this test are just data, in order to make good use of them, you have to
-compare them against `master` branch values as a baseline to know if a given code change has any impact.
+compare them against `main` branch values as a baseline to know if a given code change has any impact.
 
 ### Configuring IDEs
 
@@ -79,7 +86,7 @@ These live templates can be pasted in Preferences > Editor > Live Templates > ot
 
 **`enter`**
 ```xml
-<template name="enter" value="@Advice.OnMethodEnter(suppress = Throwable.class, inline = false)&#10;public static void onEnter() {&#10;    $END$&#10;}" description="Adds @OnMethodEnter advice" toReformat="false" toShortenFQNames="true">
+<template name="enter" value="@Advice.OnMethodEnter(suppress = Throwable.class, inline = false)&#10;public static void onEnter() {&#10;    $END$&#10;}" description="Adds @OnMethodEnter advice" toReformat="true" toShortenFQNames="true">
   <context>
     <option name="JAVA_DECLARATION" value="true" />
   </context>
@@ -89,17 +96,17 @@ These live templates can be pasted in Preferences > Editor > Live Templates > ot
 **`exit`**
 
 ```xml
-<template name="exit" value="@Advice.OnMethodExit(suppress = Throwable.class, onThrowable = Throwable.class, inline = false)&#10;public static void onExit(@Advice.Thrown Throwable thrown) {&#10;    $END$&#10;}" description="Adds @OnMethodExit advice" toReformat="false" toShortenFQNames="true">
-  <context>
-    <option name="JAVA_DECLARATION" value="true" />
-  </context>
+<template name="exit" value="@Advice.OnMethodExit(suppress = Throwable.class, onThrowable = Throwable.class, inline = false)&#10;public static void onExit(@Advice.Thrown @Nullable Throwable thrown, @Advice.Return @Nullable Object returnValue) {&#10;    $END$&#10;}" description="Adds @OnMethodExit advice" toReformat="true" toShortenFQNames="true">
+    <context>
+        <option name="JAVA_DECLARATION" value="true" />
+    </context>
 </template>
 ```
 
 
 **`logger`**
 ```xml
-<template name="logger" value="private static final Logger logger = LoggerFactory.getLogger($CLASS_NAME$.class);" description="" toReformat="false" toShortenFQNames="true">
+<template name="logger" value="private static final Logger logger = LoggerFactory.getLogger($CLASS_NAME$.class);" description="" toReformat="true" toShortenFQNames="true">
   <variable name="CLASS_NAME" expression="className()" defaultValue="" alwaysStopAt="true" />
   <context>
     <option name="JAVA_DECLARATION" value="true" />
@@ -119,7 +126,7 @@ These live templates can be pasted in Preferences > Editor > Live Templates > ot
 
 **`at`**
 ```xml
-<template name="at" value="assertThat($EXPR$)$END$;" description="assertJ assert expression" toReformat="false" toShortenFQNames="true" useStaticImport="true">
+<template name="at" value="assertThat($EXPR$)$END$;" description="assertJ assert expression" toReformat="true" toShortenFQNames="true" useStaticImport="true">
   <variable name="EXPR" expression="" defaultValue="" alwaysStopAt="true" />
   <context>
     <option name="JAVA_STATEMENT" value="true" />
@@ -157,7 +164,7 @@ the license headers will be added automatically.
 
 ### Workflow
 
-All feature development and most bug fixes hit the master branch first.
+All feature development and most bug fixes hit the main branch first.
 Pull requests should be reviewed by someone with commit access.
 Once approved, the author of the pull request,
 or reviewer if the author does not have commit access,
@@ -225,13 +232,13 @@ we should think about whether they bring us closer to or further away from those
 * Continuous Everything
   * Unit testing for every PR
   * Integration testing for every PR
-  * Performance testing for every commit to master
+  * Performance testing for every commit to main
   * Releases.
-    Daily snapshots from the master branch.
+    Daily snapshots from the main branch.
     Automated release process.
 * Feature toggles over long-running feature branches
   Even if a feature is not quite ready for production use,
-  merge it into master as soon as possible.
+  merge it into main as soon as possible.
   Create a configuration option for this new feature and disable it by default.
   One advantage is that less time will be spent rebasing long lasting feature branches.
   Another advantage is that users can try out cutting-edge features by activating a configuration option.
@@ -285,13 +292,14 @@ For illustration purpose, `1.2.3` will be the target release version, and the gi
 1. If this was a minor release, update the current minor branch (`1.x`, `2.x` etc) to the `v1.2.3` tag
    1. Update local `1.x` branch & update remote: `git branch -f 1.x v1.2.3 && git push upstream 1.x`
 1. Wait for the new version contents to become available on our [release notes page](https://www.elastic.co/guide/en/apm/agent/java/current/release-notes.html)
-1. Go to https://github.com/elastic/apm-agent-java/releases and draft a new release.
-   Provide a link to release notes in documentation (from previous step) as release description.
+1. Go to https://github.com/elastic/apm-agent-java/releases and draft a new release:
+   1. Provide a link to release notes in documentation (from previous step) as release description.
+   1. Download `elastic-apm-java-aws-lambda-layer-<VERSION>.zip` from the CI release job artifacts and upload it to the release draft
 1. Wait for released package to be available in [maven central](https://repo1.maven.org/maven2/co/elastic/apm/elastic-apm-agent/)
 1. Build and push a Docker image using the instructions below
    Use `SONATYPE_FALLBACK=1 scripts/jenkins/build_docker.sh` to build image with released artifact.
    Requires credentials, thus need to delegate this manual step to someone that has them.
-1. Update [`cloudfoundry/index.yml`](cloudfoundry/index.yml) on  master`.
+1. Update [`cloudfoundry/index.yml`](cloudfoundry/index.yml) on `main`.
 1. Publish release on Github. This will notify users watching repository.
 
 ###  Docker images

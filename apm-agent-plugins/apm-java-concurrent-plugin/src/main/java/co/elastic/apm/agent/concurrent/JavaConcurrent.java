@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,54 +15,87 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.concurrent;
 
+import co.elastic.apm.agent.collections.WeakConcurrentProviderImpl;
 import co.elastic.apm.agent.impl.Tracer;
 import co.elastic.apm.agent.impl.transaction.AbstractSpan;
 import co.elastic.apm.agent.sdk.DynamicTransformer;
 import co.elastic.apm.agent.sdk.ElasticApmInstrumentation;
-import co.elastic.apm.agent.sdk.weakmap.WeakMapSupplier;
-import com.blogspot.mydailyjava.weaklockfree.WeakConcurrentMap;
+import co.elastic.apm.agent.sdk.state.GlobalState;
+import co.elastic.apm.agent.sdk.weakconcurrent.WeakMap;
 
 import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ForkJoinTask;
 
+// Not strictly necessary as AbstractJavaConcurrentInstrumentation returns an empty collection for pluginClassLoaderRootPackages
+// but this signals the intent that this class must not be loaded from the IndyBootstrapClassLoader so that the state in this class applies globally
+@GlobalState
 public class JavaConcurrent {
 
-    private static final WeakConcurrentMap<Object, AbstractSpan<?>> contextMap = WeakMapSupplier.createMap();
+    private static final WeakMap<Object, AbstractSpan<?>> contextMap = WeakConcurrentProviderImpl.createWeakSpanMap();
+
     private static final List<Class<? extends ElasticApmInstrumentation>> RUNNABLE_CALLABLE_FJTASK_INSTRUMENTATION = Collections.
         <Class<? extends ElasticApmInstrumentation>>singletonList(RunnableCallableForkJoinTaskInstrumentation.class);
     static final ThreadLocal<Boolean> needsContext = new ThreadLocal<>();
 
-    private static void removeContext(Object o) {
-        AbstractSpan<?> context = contextMap.remove(o);
-        if (context != null) {
-            context.decrementReferences();
-        }
+    private static final Set<String> EXCLUDED_EXECUTABLE_TYPES;
+
+    static {
+        EXCLUDED_EXECUTABLE_TYPES = new HashSet<String>();
+        EXCLUDED_EXECUTABLE_TYPES.add(RunnableLambdaWrapper.class.getName());
+        EXCLUDED_EXECUTABLE_TYPES.add(CallableLambdaWrapper.class.getName());
+        // Spring-JMS polling mechanism that translates to passive onMessage handling
+        EXCLUDED_EXECUTABLE_TYPES.add("org.springframework.jms.listener.DefaultMessageListenerContainer$AsyncMessageListenerInvoker");
+        EXCLUDED_EXECUTABLE_TYPES.add("com.zaxxer.hikari.pool.HikariPool$PoolEntryCreator");
     }
 
+    private static void removeContext(Object o) {
+        contextMap.remove(o);
+    }
+
+    private static boolean shouldAvoidContextPropagation(@Nullable Object executable) {
+        return executable == null ||
+            EXCLUDED_EXECUTABLE_TYPES.contains(executable.getClass().getName()) ||
+            needsContext.get() == Boolean.FALSE;
+    }
+
+    /**
+     * Retrieves the context mapped to the provided task and activates it on the current thread.
+     * It is the responsibility of the caller to deactivate the returned context at the right time.
+     * If the mapped context is already the active span of this thread, this method returns {@code null}.
+     * @param o a task for which running there may be a context to activate
+     * @param tracer the tracer
+     * @return the context mapped to the provided task or {@code null} if such does not exist or if the mapped context
+     * is already the active one on the current thread.
+     */
     @Nullable
     public static AbstractSpan<?> restoreContext(Object o, Tracer tracer) {
         // When an Executor executes directly on the current thread we need to enable this thread for context propagation again
         needsContext.set(Boolean.TRUE);
-        AbstractSpan<?> context = contextMap.remove(o);
+
+        // we cannot remove yet, as this decrements the reference count, which may cause already ended spans to be recycled ahead of time
+        AbstractSpan<?> context = contextMap.get(o);
         if (context == null) {
             return null;
         }
-        if (tracer.getActive() != context) {
-            context.activate();
-            context.decrementReferences();
-            return context;
-        } else {
-            context.decrementReferences();
-            return null;
+
+        try {
+            if (tracer.getActive() != context) {
+                return context.activate();
+            } else {
+                return null;
+            }
+        } finally {
+            contextMap.remove(o);
         }
     }
 
@@ -76,7 +104,7 @@ public class JavaConcurrent {
      */
     @Nullable
     public static Runnable withContext(@Nullable Runnable runnable, Tracer tracer) {
-        if (runnable instanceof RunnableLambdaWrapper || runnable == null || needsContext.get() == Boolean.FALSE) {
+        if (shouldAvoidContextPropagation(runnable)) {
             return runnable;
         }
         needsContext.set(Boolean.FALSE);
@@ -92,9 +120,8 @@ public class JavaConcurrent {
     }
 
     private static void captureContext(Object task, AbstractSpan<?> active) {
-        DynamicTransformer.Accessor.get().ensureInstrumented(task.getClass(), RUNNABLE_CALLABLE_FJTASK_INSTRUMENTATION);
+        DynamicTransformer.ensureInstrumented(task.getClass(), RUNNABLE_CALLABLE_FJTASK_INSTRUMENTATION);
         contextMap.put(task, active);
-        active.incrementReferences();
         // Do no discard branches leading to async operations so not to break span references
         active.setNonDiscardable();
     }
@@ -104,7 +131,7 @@ public class JavaConcurrent {
      */
     @Nullable
     public static <T> Callable<T> withContext(@Nullable Callable<T> callable, Tracer tracer) {
-        if (callable instanceof CallableLambdaWrapper || callable == null || needsContext.get() == Boolean.FALSE) {
+        if (shouldAvoidContextPropagation(callable)) {
             return callable;
         }
         needsContext.set(Boolean.FALSE);
@@ -121,7 +148,7 @@ public class JavaConcurrent {
 
     @Nullable
     public static <T> ForkJoinTask<T> withContext(@Nullable ForkJoinTask<T> task, Tracer tracer) {
-        if (task == null || needsContext.get() == Boolean.FALSE) {
+        if (shouldAvoidContextPropagation(task)) {
             return task;
         }
         needsContext.set(Boolean.FALSE);
@@ -187,6 +214,14 @@ public class JavaConcurrent {
             }
         }
         return false;
+    }
+
+    public static void avoidPropagationOnCurrentThread() {
+        needsContext.set(Boolean.FALSE);
+    }
+
+    public static void allowContextPropagationOnCurrentThread() {
+        needsContext.set(Boolean.TRUE);
     }
 
     public static class RunnableLambdaWrapper implements Runnable {

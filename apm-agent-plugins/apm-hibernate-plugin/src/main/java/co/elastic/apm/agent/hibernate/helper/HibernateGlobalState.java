@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,24 +15,21 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.hibernate.helper;
 
 import java.sql.Connection;
 
-import com.blogspot.mydailyjava.weaklockfree.WeakConcurrentMap;
-
 import co.elastic.apm.agent.impl.transaction.Span;
 import co.elastic.apm.agent.sdk.state.GlobalState;
-import co.elastic.apm.agent.sdk.weakmap.WeakMapSupplier;
+import co.elastic.apm.agent.sdk.weakconcurrent.WeakConcurrent;
+import co.elastic.apm.agent.sdk.weakconcurrent.WeakMap;
 
 @GlobalState
 public class HibernateGlobalState {
-    public static final WeakConcurrentMap<Object, Span> objectSpanMap = WeakMapSupplier.createMap();
+    public static final WeakMap<Object, Span> objectSpanMap = WeakConcurrent.buildMap();
 
     public static void clearInternalStorage() {
         objectSpanMap.clear();
     }
-
 }

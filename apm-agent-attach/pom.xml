@@ -5,7 +5,7 @@
     <parent>
         <artifactId>apm-agent-parent</artifactId>
         <groupId>co.elastic.apm</groupId>
-        <version>1.18.0</version>
+        <version>1.29.0</version>
     </parent>
 
     <artifactId>apm-agent-attach</artifactId>
@@ -25,9 +25,13 @@
 
     <dependencies>
         <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>apm-agent-common</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
             <groupId>net.bytebuddy</groupId>
             <artifactId>byte-buddy-agent</artifactId>
-            <version>${version.byte-buddy}</version>
         </dependency>
         <dependency>
             <groupId>net.java.dev.jna</groupId>
@@ -110,21 +114,30 @@
                 <artifactId>maven-shade-plugin</artifactId>
                 <executions>
                     <execution>
-                        <id>without-jna</id>
+                        <id>shade-dependencies</id>
                         <phase>package</phase>
                         <goals>
                             <goal>shade</goal>
                         </goals>
                         <configuration>
                             <keepDependenciesWithProvidedScope>true</keepDependenciesWithProvidedScope>
+                            <createSourcesJar>true</createSourcesJar>
+                            <shadeSourcesContent>true</shadeSourcesContent>
+                            <shadedArtifactId>${project.artifactId}</shadedArtifactId>
+                            <filters>
+                                <filter>
+                                    <artifact>net.bytebuddy:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/MANIFEST.MF</exclude>
+                                        <exclude>META-INF/NOTICE</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
                             <artifactSet>
                                 <excludes>
                                     <exclude>net.java.dev.jna:*</exclude>
                                 </excludes>
                             </artifactSet>
-                            <createSourcesJar>true</createSourcesJar>
-                            <shadeSourcesContent>true</shadeSourcesContent>
-                            <shadedArtifactAttached>false</shadedArtifactAttached>
                             <relocations>
                                 <relocation>
                                     <pattern>net.bytebuddy</pattern>
@@ -132,38 +145,6 @@
                                 </relocation>
                             </relocations>
                             <transformers>
-                                <transformer implementation="org.apache.maven.plugins.shade.resource.ApacheLicenseResourceTransformer" />
-                                <transformer implementation="org.apache.maven.plugins.shade.resource.ApacheNoticeResourceTransformer" />
-                                <transformer implementation="org.apache.maven.plugins.shade.resource.IncludeResourceTransformer">
-                                    <resource>META-INF/LICENSE</resource>
-                                    <file>${apm-agent-parent.base.dir}/LICENSE</file>
-                                </transformer>
-                            </transformers>
-                        </configuration>
-                    </execution>
-                    <execution>
-                        <id>with-jna</id>
-                        <phase>package</phase>
-                        <goals>
-                            <goal>shade</goal>
-                        </goals>
-                        <configuration>
-                            <shadedArtifactAttached>true</shadedArtifactAttached>
-                            <shadedClassifierName>standalone</shadedClassifierName>
-                            <createSourcesJar>true</createSourcesJar>
-                            <shadeSourcesContent>true</shadeSourcesContent>
-                            <relocations>
-                                <relocation>
-                                    <pattern>net.bytebuddy</pattern>
-                                    <shadedPattern>co.elastic.apm.attach.bytebuddy</shadedPattern>
-                                </relocation>
-                            </relocations>
-                            <transformers>
-                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                                    <manifestEntries>
-                                        <Main-Class>co.elastic.apm.attach.RemoteAttacher</Main-Class>
-                                    </manifestEntries>
-                                </transformer>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ApacheLicenseResourceTransformer" />
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ApacheNoticeResourceTransformer" />
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.IncludeResourceTransformer">

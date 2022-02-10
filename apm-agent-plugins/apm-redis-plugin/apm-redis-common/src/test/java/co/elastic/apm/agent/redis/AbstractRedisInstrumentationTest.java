@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,33 +15,31 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.redis;
 
 import co.elastic.apm.agent.AbstractInstrumentationTest;
 import co.elastic.apm.agent.impl.context.Destination;
+import co.elastic.apm.agent.impl.transaction.Outcome;
 import co.elastic.apm.agent.impl.transaction.Span;
-import org.assertj.core.api.Java6Assertions;
+import co.elastic.apm.agent.impl.transaction.Transaction;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import redis.embedded.RedisServer;
+import org.testcontainers.containers.GenericContainer;
+import org.testcontainers.containers.wait.strategy.Wait;
 
-import javax.net.ServerSocketFactory;
 import java.io.IOException;
-import java.net.InetAddress;
-import java.net.ServerSocket;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 public abstract class AbstractRedisInstrumentationTest extends AbstractInstrumentationTest {
-    protected RedisServer server;
     protected int redisPort;
     private String expectedAddress;
+    protected static GenericContainer redisContainer;
 
     public AbstractRedisInstrumentationTest() {
         this.expectedAddress = "localhost";
@@ -56,29 +49,24 @@ public abstract class AbstractRedisInstrumentationTest extends AbstractInstrumen
         this.expectedAddress = expectedAddress;
     }
 
-    private static int getAvailablePort() throws IOException {
-        try (ServerSocket socket = ServerSocketFactory.getDefault().createServerSocket(0, 1, InetAddress.getByName("localhost"))) {
-            return socket.getLocalPort();
-        }
-    }
-
     @Before
     @BeforeEach
     public final void initRedis() throws IOException {
-        redisPort = getAvailablePort();
-        server = RedisServer.builder()
-            .setting("bind 127.0.0.1")
-            .port(redisPort)
-            .build();
-        server.start();
+        redisContainer = new GenericContainer("redis:6.2.6").withExposedPorts(6379);
+        redisContainer.start();
+        redisContainer.waitingFor(Wait.forLogMessage("Started!", 1));
+        redisPort = redisContainer.getFirstMappedPort();
         tracer.startRootTransaction(null).activate();
     }
 
     @After
     @AfterEach
     public final void stopRedis() {
-        tracer.currentTransaction().deactivate().end();
-        server.stop();
+        Transaction transaction = tracer.currentTransaction();
+        if (transaction != null) {
+            transaction.deactivate().end();
+        }
+        redisContainer.stop();
     }
 
     public void assertTransactionWithRedisSpans(String... commands) {
@@ -88,6 +76,7 @@ public abstract class AbstractRedisInstrumentationTest extends AbstractInstrumen
         assertThat(reporter.getSpans().stream().map(Span::getSubtype).distinct()).containsExactly("redis");
         assertThat(reporter.getSpans().stream().map(Span::getAction).distinct()).containsExactly("query");
         assertThat(reporter.getSpans().stream().map(Span::isExit).distinct()).containsExactly(true);
+        assertThat(reporter.getSpans().stream().map(Span::getOutcome).distinct()).containsExactly(Outcome.SUCCESS);
         verifyDestinationDetails(reporter.getSpans());
     }
 
@@ -99,9 +88,7 @@ public abstract class AbstractRedisInstrumentationTest extends AbstractInstrumen
                 assertThat(destination.getPort()).isEqualTo(redisPort);
             }
             Destination.Service service = destination.getService();
-            Java6Assertions.assertThat(service.getName().toString()).isEqualTo("redis");
-            Java6Assertions.assertThat(service.getResource().toString()).isEqualTo("redis");
-            Java6Assertions.assertThat(service.getType()).isEqualTo("db");
+            assertThat(service.getResource().toString()).isEqualTo("redis");
         }
     }
 

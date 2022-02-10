@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,13 +15,12 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.api;
 
 import javax.annotation.Nonnull;
 
-public class ScopeImpl implements Scope {
+class ScopeImpl implements Scope {
 
     @Nonnull
     @SuppressWarnings({"FieldCanBeLocal", "unused"})
@@ -39,6 +33,6 @@ public class ScopeImpl implements Scope {
 
     @Override
     public void close() {
-        // co.elastic.apm.agent.plugin.api.ApiScopeInstrumentation
+        // co.elastic.apm.agent.pluginapi.ApiScopeInstrumentation
     }
 }

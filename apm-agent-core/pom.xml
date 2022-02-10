@@ -3,9 +3,9 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>co.elastic.apm</groupId>
         <artifactId>apm-agent-parent</artifactId>
-        <version>1.18.0</version>
+        <groupId>co.elastic.apm</groupId>
+        <version>1.29.0</version>
     </parent>
 
     <artifactId>apm-agent-core</artifactId>
@@ -20,7 +20,6 @@
     <properties>
         <maven-deploy-plugin.skip>true</maven-deploy-plugin.skip>
         <apm-agent-parent.base.dir>${project.basedir}/..</apm-agent-parent.base.dir>
-        <version.cucumber>5.4.0</version.cucumber>
     </properties>
 
     <dependencies>
@@ -30,14 +29,34 @@
             <version>${project.version}</version>
         </dependency>
         <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>apm-agent-common</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>apm-agent-cached-lookup-key</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.blogspot.mydailyjava</groupId>
+            <artifactId>weak-lock-free</artifactId>
+            <version>0.18</version>
+        </dependency>
+        <dependency>
             <groupId>com.lmax</groupId>
             <artifactId>disruptor</artifactId>
-            <version>3.4.2</version>
+            <version>3.4.4</version>
         </dependency>
         <dependency>
             <groupId>org.jctools</groupId>
             <artifactId>jctools-core</artifactId>
-            <version>2.1.2</version>
+            <version>3.3.0</version>
+        </dependency>
+        <dependency>
+            <groupId>com.googlecode.concurrentlinkedhashmap</groupId>
+            <artifactId>concurrentlinkedhashmap-lru</artifactId>
+            <version>1.4.2</version>
         </dependency>
 
         <dependency>
@@ -51,9 +70,14 @@
             <version>${version.log4j}</version>
         </dependency>
         <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>${version.slf4j}</version>
+        </dependency>
+        <dependency>
             <groupId>co.elastic.logging</groupId>
             <artifactId>log4j2-ecs-layout</artifactId>
-            <version>0.3.0</version>
+            <version>${version.log4j2-ecs-layout}</version>
         </dependency>
 
         <dependency>
@@ -64,12 +88,19 @@
         <dependency>
             <groupId>org.ow2.asm</groupId>
             <artifactId>asm-tree</artifactId>
-            <version>8.0.1</version>
+            <version>${version.asm}</version>
         </dependency>
         <dependency>
             <groupId>org.hdrhistogram</groupId>
             <artifactId>HdrHistogram</artifactId>
             <version>2.1.11</version>
+        </dependency>
+
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>apm-agent-bootstrap</artifactId>
+            <version>${project.version}</version>
+            <scope>runtime</scope>
         </dependency>
 
         <dependency>
@@ -90,6 +121,7 @@
             <version>2.0.23.Final</version>
             <scope>test</scope>
         </dependency>
+        <!-- jetty required to test reporter -->
         <dependency>
             <groupId>org.eclipse.jetty</groupId>
             <artifactId>jetty-server</artifactId>
@@ -114,13 +146,11 @@
             <version>1.2</version>
             <scope>test</scope>
         </dependency>
-        <!--For setting environment variables-->
+        <!-- https://mvnrepository.com/artifact/commons-codec/commons-codec -->
         <dependency>
-            <groupId>com.github.stefanbirkner</groupId>
-            <artifactId>system-rules</artifactId>
-            <!-- Latest version (1.19.0) doesn't work at the moment - https://github.com/stefanbirkner/system-rules/issues/70 -->
-            <version>1.17.2</version>
-            <scope>test</scope>
+            <groupId>commons-codec</groupId>
+            <artifactId>commons-codec</artifactId>
+            <version>1.7</version>
         </dependency>
         <dependency>
             <groupId>org.apache.httpcomponents</groupId>
@@ -138,6 +168,17 @@
             <groupId>io.cucumber</groupId>
             <artifactId>cucumber-junit</artifactId>
             <version>${version.cucumber}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.cucumber</groupId>
+            <artifactId>cucumber-picocontainer</artifactId>
+            <version>${version.cucumber}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.ivy</groupId>
+            <artifactId>ivy</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -163,75 +204,48 @@
             <artifactId>testcontainers</artifactId>
             <scope>test</scope>
         </dependency>
-		<dependency>
+        <dependency>
             <groupId>org.json</groupId>
             <artifactId>json</artifactId>
-            <version>20200518</version>
-        </dependency>
-		<dependency>
-            <groupId>commons-codec</groupId>
-            <artifactId>commons-codec</artifactId>
-            <version>1.9</version>
+            <version>20180130</version>
         </dependency>
     </dependencies>
 
     <build>
         <plugins>
-		    <plugin>
+            <plugin>
                 <artifactId>maven-shade-plugin</artifactId>
                 <version>3.2.3</version>
                 <executions>
                     <execution>
-					    <phase>package</phase>
+                        <phase>package</phase>
                         <goals>
                             <goal>shade</goal>
                         </goals>
-						<configuration>
-								<createSourcesJar>true</createSourcesJar>
-								<shadeSourcesContent>true</shadeSourcesContent>
-								<shadedArtifactAttached>false</shadedArtifactAttached>
-						<filters>
-							<filter>
-								<artifact>*:*</artifact>
-								<excludes>
-									<exclude>**/module-info.class</exclude>
-									<exclude>META-INF/versions/**</exclude>
-								</excludes>
-							</filter>
-						</filters>
-						<relocations>
-							<relocation>
-								<pattern>org.apache.commons.codec</pattern>
-								<shadedPattern>co.elastic.apm.agent.shaded.codec</shadedPattern>
-							</relocation>
-						</relocations>
-						</configuration>
+                        <configuration>
+                            <createSourcesJar>true</createSourcesJar>
+                            <shadeSourcesContent>true</shadeSourcesContent>
+                            <shadedArtifactAttached>false</shadedArtifactAttached>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>**/module-info.class</exclude>
+                                        <exclude>META-INF/versions/**</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                            <relocations>
+                                <relocation>
+                                    <pattern>org.apache.commons.codec</pattern>
+                                    <shadedPattern>co.elastic.apm.agent.shaded.codec</shadedPattern>
+                                </relocation>
+                            </relocations>
+                        </configuration>
                     </execution>
                 </executions>
             </plugin>
-			
-            <plugin>
-                <groupId>org.jsonschema2pojo</groupId>
-                <artifactId>jsonschema2pojo-maven-plugin</artifactId>
-                <version>0.5.1</version>
-                <configuration>
-                    <sourceDirectory>${basedir}/src/main/resources/schema</sourceDirectory>
-                    <targetPackage>co.elastic.apm.agent.impl.intake</targetPackage>
-                    <usePrimitives>true</usePrimitives>
-                    <useLongIntegers>true</useLongIntegers>
-                    <includeAdditionalProperties>false</includeAdditionalProperties>
-                    <formatDateTimes>true</formatDateTimes>
-                    <generateBuilders>true</generateBuilders>
-                    <skip>true</skip>
-                </configuration>
-                <executions>
-                    <execution>
-                        <goals>
-                            <goal>generate</goal>
-                        </goals>
-                    </execution>
-                </executions>
-            </plugin>
+
             <plugin>
                 <artifactId>maven-jar-plugin</artifactId>
                 <executions>

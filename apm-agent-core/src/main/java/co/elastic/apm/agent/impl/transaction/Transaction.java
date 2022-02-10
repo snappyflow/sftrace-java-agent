@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,21 +15,20 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.impl.transaction;
 
 import co.elastic.apm.agent.configuration.CoreConfiguration;
 import co.elastic.apm.agent.impl.ElasticApmTracer;
+import co.elastic.apm.agent.impl.context.Response;
 import co.elastic.apm.agent.impl.context.TransactionContext;
+import co.elastic.apm.agent.impl.context.web.ResultUtil;
 import co.elastic.apm.agent.impl.sampling.Sampler;
 import co.elastic.apm.agent.metrics.Labels;
 import co.elastic.apm.agent.metrics.MetricRegistry;
 import co.elastic.apm.agent.metrics.Timer;
 import co.elastic.apm.agent.util.KeyListConcurrentHashMap;
 import org.HdrHistogram.WriterReaderPhaser;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 import java.util.List;
@@ -44,7 +38,6 @@ import java.util.List;
  */
 public class Transaction extends AbstractSpan<Transaction> {
 
-    private static final Logger logger = LoggerFactory.getLogger(Transaction.class);
     private static final ThreadLocal<Labels.Mutable> labelsThreadLocal = new ThreadLocal<Labels.Mutable>() {
         @Override
         protected Labels.Mutable initialValue() {
@@ -97,8 +90,17 @@ public class Transaction extends AbstractSpan<Transaction> {
     @Nullable
     private String frameworkName;
 
+    private boolean frameworkNameSetByUser;
+
     @Nullable
     private String frameworkVersion;
+
+    /**
+     * Faas
+     * <p>
+     * If a services is executed as a serverless function (function as a service), FaaS-specific information can be collected within this object.
+     */
+    private final Faas faas = new Faas();
 
     @Override
     public Transaction getTransaction() {
@@ -205,11 +207,11 @@ public class Transaction extends AbstractSpan<Transaction> {
         return this;
     }
 
-    public void setUser(String id, String email, String username) {
+    public void setUser(String id, String email, String username, String domain) {
         if (!isSampled()) {
             return;
         }
-        getContext().getUser().withId(id).withEmail(email).withUsername(username);
+        getContext().getUser().withDomain(domain).withId(id).withEmail(email).withUsername(username);
     }
 
     @Override
@@ -220,9 +222,26 @@ public class Transaction extends AbstractSpan<Transaction> {
         if (type == null) {
             type = "custom";
         }
+
+        if (outcomeNotSet()) {
+            // set outcome from HTTP status if not already set
+            Response response = getContext().getResponse();
+            Outcome outcome;
+
+            int httpStatus = response.getStatusCode();
+            if (httpStatus > 0) {
+                outcome = ResultUtil.getOutcomeByHttpServerStatus(httpStatus);
+            } else {
+                outcome = hasCapturedExceptions() ? Outcome.FAILURE : Outcome.SUCCESS;
+            }
+            withOutcome(outcome);
+        }
+
         context.onTransactionEnd();
         incrementTimer("app", null, getSelfDuration());
     }
+
+
 
     @Override
     protected void afterEnd() {
@@ -253,6 +272,7 @@ public class Transaction extends AbstractSpan<Transaction> {
         maxSpans = 0;
         frameworkName = null;
         frameworkVersion = null;
+        faas.resetState();
         // don't clear timerBySpanTypeAndSubtype map (see field-level javadoc)
     }
 
@@ -306,7 +326,19 @@ public class Transaction extends AbstractSpan<Transaction> {
     }
 
     public void setFrameworkName(@Nullable String frameworkName) {
+        if (frameworkNameSetByUser) {
+            return;
+        }
         this.frameworkName = frameworkName;
+    }
+
+    public void setUserFrameworkName(@Nullable String frameworkName) {
+        if (frameworkName != null && frameworkName.isEmpty()) {
+            this.frameworkName = null;
+        } else {
+            this.frameworkName = frameworkName;
+        }
+        this.frameworkNameSetByUser = true;
     }
 
     @Nullable
@@ -321,6 +353,15 @@ public class Transaction extends AbstractSpan<Transaction> {
     @Nullable
     public String getFrameworkVersion() {
         return this.frameworkVersion;
+    }
+
+    /**
+     * Function as a Service (Faas)
+     * <p>
+     * If a services is executed as a serverless function (function as a service), FaaS-specific information can be collected within this object.
+     */
+    public Faas getFaas() {
+        return faas;
     }
 
     @Override
@@ -379,13 +420,14 @@ public class Transaction extends AbstractSpan<Transaction> {
             }
             final Labels.Mutable labels = labelsThreadLocal.get();
             labels.resetState();
-            labels.transactionName(name).transactionType(type);
+            labels.serviceName(getTraceContext().getServiceName())
+                .serviceVersion(getTraceContext().getServiceVersion())
+                .transactionName(name)
+                .transactionType(type);
             final MetricRegistry metricRegistry = tracer.getMetricRegistry();
             long criticalValueAtEnter = metricRegistry.writerCriticalSectionEnter();
             try {
-                metricRegistry.updateTimer("transaction.duration", labels, getDuration());
                 if (collectBreakdownMetrics) {
-                    metricRegistry.incrementCounter("transaction.breakdown.count", labels);
                     List<String> types = timerBySpanTypeAndSubtype.keyList();
                     for (int i = 0; i < types.size(); i++) {
                         String spanType = types.get(i);

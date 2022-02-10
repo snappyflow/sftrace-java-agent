@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,12 +15,13 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.bci.classloading;
 
+import co.elastic.apm.agent.common.util.AgentInfo;
 import co.elastic.apm.agent.configuration.CoreConfiguration;
 import co.elastic.apm.agent.sdk.ElasticApmInstrumentation;
+import co.elastic.apm.agent.sdk.logging.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
@@ -50,7 +46,8 @@ public class ExternalPluginClassLoader extends URLClassLoader {
         super(new URL[]{pluginJar.toURI().toURL()}, agentClassLoader);
         classNames = Collections.unmodifiableList(scanForClasses(pluginJar));
         if (classNames.contains(ElasticApmInstrumentation.class.getName())) {
-            throw new IllegalStateException("The plugin %s contains the plugin SDK. Please make sure the scope for the dependency apm-agent-plugin-sdk is set to provided.");
+            throw new IllegalStateException(String.format("The plugin %s contains the plugin SDK. Please make sure the " +
+                "scope for the dependency apm-agent-plugin-sdk is set to provided.", pluginJar.getName()));
         }
     }
 
@@ -61,7 +58,27 @@ public class ExternalPluginClassLoader extends URLClassLoader {
             while (entries.hasMoreElements()) {
                 JarEntry jarEntry = entries.nextElement();
                 if (jarEntry.getName().endsWith(".class")) {
-                    tempClassNames.add(jarEntry.getName().replace('/', '.').substring(0, jarEntry.getName().length() - 6));
+                    String fqcn = jarEntry.getName().replace('/', '.').substring(0, jarEntry.getName().length() - 6);
+                    if (fqcn.startsWith("org.slf4j") || fqcn.startsWith("org.apache.logging")) {
+                        throw new IllegalStateException(String.format("Package \"%s\" is used within plugin %s. This is not allowed " +
+                                "because it is already used by the agent. For logging purposes, use the agent SDK logging facade - %s",
+                            fqcn.substring(0, fqcn.lastIndexOf('.')),
+                            pluginJar.getName(),
+                            LoggerFactory.class.getName()
+                        ));
+                    }
+                    for (String agentDependencyPackage : AgentInfo.getAgentDependencyPackages()) {
+                        if (fqcn.startsWith(agentDependencyPackage)) {
+                            throw new IllegalStateException(String.format("Package \"%s\" is used within plugin %s. This is not allowed " +
+                                "because the same dependency is used by the agent. Please either replace the corresponding dependency or " +
+                                "make sure its scope is set to provided. See the full list of such packages in %s",
+                                fqcn.substring(0, fqcn.lastIndexOf('.')),
+                                pluginJar.getName(),
+                                AgentInfo.class.getName()
+                            ));
+                        }
+                    }
+                    tempClassNames.add(fqcn);
                 }
             }
         }

@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,23 +15,23 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.report;
 
-import co.elastic.apm.agent.impl.MetaData;
+import co.elastic.apm.agent.impl.metadata.MetaData;
 import co.elastic.apm.agent.impl.stacktrace.StacktraceConfiguration;
 import co.elastic.apm.agent.report.processor.ProcessorEventHandler;
 import co.elastic.apm.agent.report.serialize.DslJsonSerializer;
 import org.stagemonitor.configuration.ConfigurationRegistry;
 
 import javax.annotation.Nonnull;
+import java.util.concurrent.Future;
 
 public class ReporterFactory {
 
     public Reporter createReporter(ConfigurationRegistry configurationRegistry,
                                    ApmServerClient apmServerClient,
-                                   MetaData metaData) {
+                                   Future<MetaData> metaData) {
 
         ReporterConfiguration reporterConfiguration = configurationRegistry.getConfig(ReporterConfiguration.class);
         ReportingEventHandler reportingEventHandler = getReportingEventHandler(configurationRegistry, reporterConfiguration, metaData, apmServerClient);
@@ -46,12 +41,12 @@ public class ReporterFactory {
     @Nonnull
     private ReportingEventHandler getReportingEventHandler(ConfigurationRegistry configurationRegistry,
                                                            ReporterConfiguration reporterConfiguration,
-                                                           MetaData metaData,
+                                                           Future<MetaData> metaData,
                                                            ApmServerClient apmServerClient) {
 
-        DslJsonSerializer payloadSerializer = new DslJsonSerializer(configurationRegistry.getConfig(StacktraceConfiguration.class), apmServerClient);
+        DslJsonSerializer payloadSerializer = new DslJsonSerializer(configurationRegistry.getConfig(StacktraceConfiguration.class), apmServerClient, metaData);
         ProcessorEventHandler processorEventHandler = ProcessorEventHandler.loadProcessors(configurationRegistry);
-        return new IntakeV2ReportingEventHandler(reporterConfiguration, processorEventHandler, payloadSerializer, metaData, apmServerClient);
+        return new IntakeV2ReportingEventHandler(reporterConfiguration, processorEventHandler, payloadSerializer, apmServerClient);
     }
 
 }

@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,11 +15,8 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.log.shipper;
-
-import java.io.IOException;
 
 public interface FileChangeListener {
 
@@ -37,10 +29,10 @@ public interface FileChangeListener {
      * @param length
      * @param eol
      * @return
-     * @throws IOException If there is an exception while processing the line.
-     *                     Throwing an exception stops tailing the file.
+     * @throws Exception If there is an exception while processing the line.
+     *                   Throwing an exception stops tailing the file.
      */
-    boolean onLineAvailable(TailableFile file, byte[] line, int offset, int length, boolean eol) throws IOException;
+    boolean onLineAvailable(TailableFile file, byte[] line, int offset, int length, boolean eol) throws Exception;
 
     void onIdle();
 

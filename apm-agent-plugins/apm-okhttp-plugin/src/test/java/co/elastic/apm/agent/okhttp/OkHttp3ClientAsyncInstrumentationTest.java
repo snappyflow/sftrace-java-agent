@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,11 +15,12 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.okhttp;
 
 import co.elastic.apm.agent.httpclient.AbstractHttpClientInstrumentationTest;
+import co.elastic.apm.agent.util.Version;
+import co.elastic.apm.agent.util.VersionUtils;
 import okhttp3.Call;
 import okhttp3.Callback;
 import okhttp3.OkHttpClient;
@@ -33,16 +29,29 @@ import okhttp3.Response;
 import org.junit.Before;
 
 import java.io.IOException;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
 
 public class OkHttp3ClientAsyncInstrumentationTest extends AbstractHttpClientInstrumentationTest {
 
     private OkHttpClient client;
+    private Version okhttpVersion;
 
     @Before
     public void setUp() {
         client = new OkHttpClient();
+        String versionString = VersionUtils.getVersion(OkHttpClient.class, "com.squareup.okhttp3", "okhttp");
+        okhttpVersion = Version.of(Objects.requireNonNullElse(versionString, "4.0.0"));
+    }
+
+    @Override
+    protected boolean isErrorOnCircularRedirectSupported() {
+        return okhttpVersion.compareTo(Version.of("3.6.0")) > -1;
+    }
+
+    @Override
+    protected boolean isIpv6Supported() {
+        return okhttpVersion.compareTo(Version.of("3.3.0")) > -1;
     }
 
     @Override

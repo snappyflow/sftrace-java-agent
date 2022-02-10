@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,7 +15,6 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.impl.transaction;
 
@@ -29,18 +23,17 @@ import co.elastic.apm.agent.impl.ElasticApmTracer;
 import co.elastic.apm.agent.impl.Tracer;
 import co.elastic.apm.agent.impl.sampling.Sampler;
 import co.elastic.apm.agent.objectpool.Recyclable;
-import co.elastic.apm.agent.sdk.weakmap.WeakMapSupplier;
+import co.elastic.apm.agent.sdk.weakconcurrent.WeakConcurrent;
+import co.elastic.apm.agent.sdk.weakconcurrent.WeakMap;
 import co.elastic.apm.agent.util.ByteUtils;
+import co.elastic.apm.agent.util.ClassLoaderUtils;
 import co.elastic.apm.agent.util.HexUtils;
-import com.blogspot.mydailyjava.weaklockfree.WeakConcurrentMap;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import co.elastic.apm.agent.sdk.logging.Logger;
+import co.elastic.apm.agent.sdk.logging.LoggerFactory;
 
 import javax.annotation.Nullable;
 import java.lang.ref.WeakReference;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Objects;
 
 /**
@@ -60,7 +53,7 @@ import java.util.Objects;
  * </pre>
  * <p>
  * Binary representation (e.g. 0.11.0.0+ Kafka record header), based on
- * https://github.com/elastic/apm/blob/master/docs/agent-development.md#binary-fields:
+ * https://github.com/elastic/apm/blob/main/docs/agent-development.md#binary-fields:
  * <pre>
  *      traceparent     = version version_format
  *      version         = 1BYTE                   ; version is 0 in the current spec
@@ -101,10 +94,13 @@ public class TraceContext implements Recyclable {
     private static final int BINARY_FORMAT_FLAGS_OFFSET = 27;
     private static final byte BINARY_FORMAT_FLAGS_FIELD_ID = (byte) 0b0000_0010;
     private static final Logger logger = LoggerFactory.getLogger(TraceContext.class);
+
+    private static final Double SAMPLE_RATE_ZERO = 0d;
+
     /**
      * Helps to reduce allocations by caching {@link WeakReference}s to {@link ClassLoader}s
      */
-    private static final WeakConcurrentMap<ClassLoader, WeakReference<ClassLoader>> classLoaderWeakReferenceCache = WeakMapSupplier.createMap();
+    private static final WeakMap<ClassLoader, WeakReference<ClassLoader>> classLoaderWeakReferenceCache = WeakConcurrent.buildMap();
     private static final ChildContextCreator<TraceContext> FROM_PARENT_CONTEXT = new ChildContextCreator<TraceContext>() {
         @Override
         public boolean asChildOf(TraceContext child, TraceContext parent) {
@@ -123,7 +119,7 @@ public class TraceContext implements Recyclable {
         @Override
         public void accept(@Nullable String tracestateHeaderValue, TraceContext state) {
             if (tracestateHeaderValue != null) {
-                state.addTracestate(tracestateHeaderValue);
+                state.traceState.addTextHeader(tracestateHeaderValue);
             }
         }
     };
@@ -136,14 +132,14 @@ public class TraceContext implements Recyclable {
                 }
 
                 boolean isValid = false;
-                String traceparent = traceContextHeaderGetter.getFirstHeader(ELASTIC_TRACE_PARENT_TEXTUAL_HEADER_NAME, carrier);
+                String traceparent = traceContextHeaderGetter.getFirstHeader(W3C_TRACE_PARENT_TEXTUAL_HEADER_NAME, carrier);
                 if (traceparent != null) {
                     isValid = child.asChildOf(traceparent);
                 }
 
                 if (!isValid) {
                     // Look for the legacy Elastic traceparent header (in case this comes from an older agent)
-                    traceparent = traceContextHeaderGetter.getFirstHeader(W3C_TRACE_PARENT_TEXTUAL_HEADER_NAME, carrier);
+                    traceparent = traceContextHeaderGetter.getFirstHeader(ELASTIC_TRACE_PARENT_TEXTUAL_HEADER_NAME, carrier);
                     if (traceparent != null) {
                         isValid = child.asChildOf(traceparent);
                     }
@@ -189,6 +185,7 @@ public class TraceContext implements Recyclable {
         }
     };
 
+
     public static <C> boolean containsTraceContextTextHeaders(C carrier, TextHeaderGetter<C> headerGetter) {
         return headerGetter.getFirstHeader(W3C_TRACE_PARENT_TEXTUAL_HEADER_NAME, carrier) != null;
     }
@@ -230,7 +227,7 @@ public class TraceContext implements Recyclable {
     // weakly referencing to avoid CL leaks in case of leaked spans
     @Nullable
     private WeakReference<ClassLoader> applicationClassLoader;
-    private final List<String> tracestate = new ArrayList<>(1);
+    private final TraceState traceState;
 
     final CoreConfiguration coreConfiguration;
 
@@ -239,13 +236,18 @@ public class TraceContext implements Recyclable {
      *
      * @see EpochTickClock
      */
-    private EpochTickClock clock = new EpochTickClock();
+    private final EpochTickClock clock = new EpochTickClock();
 
     @Nullable
     private String serviceName;
 
+    @Nullable
+    private String serviceVersion;
+
     private TraceContext(ElasticApmTracer tracer, Id id) {
         coreConfiguration = tracer.getConfig(CoreConfiguration.class);
+        traceState = new TraceState();
+        traceState.setSizeLimit(coreConfiguration.getTracestateSizeLimit());
         this.tracer = tracer;
         this.id = id;
     }
@@ -298,6 +300,12 @@ public class TraceContext implements Recyclable {
         return AS_ROOT;
     }
 
+    /**
+     * Tries to set trace context identifiers (Id, parent, ...) from traceparent text header value
+     *
+     * @param traceParentHeader traceparent text header value
+     * @return {@literal true} if header value is valid, {@literal false} otherwise
+     */
     boolean asChildOf(String traceParentHeader) {
         traceParentHeader = traceParentHeader.trim();
         try {
@@ -349,6 +357,12 @@ public class TraceContext implements Recyclable {
         }
     }
 
+    /**
+     * Tries to set trace context identifiers (Id, parent, ...) from traceparent binary header value
+     *
+     * @param traceParentHeader traceparent binary header value
+     * @return {@literal true} if header value is valid, {@literal false} otherwise
+     */
     boolean asChildOf(byte[] traceParentHeader) {
         if (logger.isTraceEnabled()) {
             logger.trace("Binary header content UTF-8-decoded: {}", new String(traceParentHeader, StandardCharsets.UTF_8));
@@ -410,7 +424,8 @@ public class TraceContext implements Recyclable {
         id.setToRandomValue();
         transactionId.copyFrom(id);
         if (sampler.isSampled(traceId)) {
-            this.flags = FLAG_RECORDED;
+            flags = FLAG_RECORDED;
+            traceState.set(sampler.getSampleRate(), sampler.getTraceStateHeader());
         }
         clock.init();
         onMutation();
@@ -424,11 +439,9 @@ public class TraceContext implements Recyclable {
         id.setToRandomValue();
         clock.init(parent.clock);
         serviceName = parent.serviceName;
+        serviceVersion = parent.serviceVersion;
         applicationClassLoader = parent.applicationClassLoader;
-        List<String> parentTracestate = parent.tracestate;
-        for (int i = 0, size = parentTracestate.size(); i < size; i++) {
-            tracestate.add(parentTracestate.get(i));
-        }
+        traceState.copyFrom(parent.traceState);
         onMutation();
     }
 
@@ -443,8 +456,10 @@ public class TraceContext implements Recyclable {
         discardable = true;
         clock.resetState();
         serviceName = null;
+        serviceVersion = null;
         applicationClassLoader = null;
-        tracestate.clear();
+        traceState.resetState();
+        traceState.setSizeLimit(coreConfiguration.getTracestateSizeLimit());
     }
 
     /**
@@ -484,6 +499,19 @@ public class TraceContext implements Recyclable {
      */
     public boolean isSampled() {
         return isRecorded();
+    }
+
+    /**
+     * Returns the sample rate used for this transaction/span between 0.0 and 1.0 or {@link Double#NaN} if sample rate is unknown
+     *
+     * @return sample rate
+     */
+    public double getSampleRate() {
+        if (isRecorded()) {
+            return traceState.getSampleRate();
+        } else {
+            return SAMPLE_RATE_ZERO;
+        }
     }
 
     /**
@@ -529,16 +557,18 @@ public class TraceContext implements Recyclable {
      * @param <C>          the header carrier type, for example - an HTTP request
      */
     <C> void propagateTraceContext(C carrier, TextHeaderSetter<C> headerSetter) {
-        headerSetter.setHeader(W3C_TRACE_PARENT_TEXTUAL_HEADER_NAME, getOutgoingTraceParentTextHeader().toString(), carrier);
+        String outgoingTraceParent = getOutgoingTraceParentTextHeader().toString();
+
+        headerSetter.setHeader(W3C_TRACE_PARENT_TEXTUAL_HEADER_NAME, outgoingTraceParent, carrier);
         if (coreConfiguration.isElasticTraceparentHeaderEnabled()) {
-            headerSetter.setHeader(ELASTIC_TRACE_PARENT_TEXTUAL_HEADER_NAME, getOutgoingTraceParentTextHeader().toString(), carrier);
+            headerSetter.setHeader(ELASTIC_TRACE_PARENT_TEXTUAL_HEADER_NAME, outgoingTraceParent, carrier);
         }
-        if (tracestate.size() == 1) {
-            headerSetter.setHeader(TRACESTATE_HEADER_NAME, tracestate.get(0), carrier);
-        } else if (!tracestate.isEmpty()) {
-            String tracestateHeaderValue = TextTracestateAppender.instance().join(tracestate, coreConfiguration.getTracestateSizeLimit());
-            headerSetter.setHeader(TRACESTATE_HEADER_NAME, tracestateHeaderValue, carrier);
+
+        String outgoingTraceState = traceState.toTextHeader();
+        if (outgoingTraceState != null) {
+            headerSetter.setHeader(TRACESTATE_HEADER_NAME, outgoingTraceState, carrier);
         }
+        logger.trace("Trace context headers added to {}", carrier);
     }
 
     /**
@@ -564,7 +594,7 @@ public class TraceContext implements Recyclable {
     }
 
     /**
-     * Returns the value of the {@code traceparent} header for downstream services.
+     * @return  the value of the {@code traceparent} header for downstream services.
      */
     StringBuilder getOutgoingTraceParentTextHeader() {
         if (outgoingTextHeader.length() == 0) {
@@ -627,8 +657,9 @@ public class TraceContext implements Recyclable {
         discardable = other.discardable;
         clock.init(other.clock);
         serviceName = other.serviceName;
+        serviceVersion = other.serviceVersion;
         applicationClassLoader = other.applicationClassLoader;
-        tracestate.addAll(other.tracestate);
+        traceState.copyFrom(other.traceState);
         onMutation();
     }
 
@@ -657,6 +688,20 @@ public class TraceContext implements Recyclable {
      */
     public void setServiceName(@Nullable String serviceName) {
         this.serviceName = serviceName;
+    }
+
+    @Nullable
+    public String getServiceVersion() {
+        return serviceVersion;
+    }
+
+    /**
+     * Overrides the {@code co.elastic.apm.agent.impl.payload.Service#version} property sent via the meta data Intake V2 event.
+     *
+     * @param serviceVersion the service version for this event
+     */
+    public void setServiceVersion(@Nullable String serviceVersion) {
+        this.serviceVersion = serviceVersion;
     }
 
     public Span createSpan() {
@@ -688,14 +733,15 @@ public class TraceContext implements Recyclable {
     }
 
     void setApplicationClassLoader(@Nullable ClassLoader classLoader) {
-        if (classLoader != null) {
-            WeakReference<ClassLoader> local = classLoaderWeakReferenceCache.get(classLoader);
-            if (local == null) {
-                local = new WeakReference<>(classLoader);
-                classLoaderWeakReferenceCache.putIfAbsent(classLoader, local);
-            }
-            applicationClassLoader = local;
+        if (ClassLoaderUtils.isBootstrapClassLoader(classLoader) || ClassLoaderUtils.isAgentClassLoader(classLoader)) {
+            return;
         }
+        WeakReference<ClassLoader> local = classLoaderWeakReferenceCache.get(classLoader);
+        if (local == null) {
+            local = new WeakReference<>(classLoader);
+            classLoaderWeakReferenceCache.putIfAbsent(classLoader, local);
+        }
+        applicationClassLoader = local;
     }
 
     @Nullable
@@ -707,8 +753,8 @@ public class TraceContext implements Recyclable {
         }
     }
 
-    public void addTracestate(String headerValue) {
-        tracestate.add(headerValue);
+    public TraceState getTraceState() {
+        return traceState;
     }
 
     public byte[] serialize() {
@@ -727,7 +773,7 @@ public class TraceContext implements Recyclable {
         ByteUtils.putLong(buffer, offset, clock.getOffset());
     }
 
-    private void asChildOf(byte[] buffer, @Nullable String serviceName) {
+    private void asChildOf(byte[] buffer, @Nullable String serviceName, @Nullable String serviceVersion) {
         int offset = 0;
         offset += traceId.fromBytes(buffer, offset);
         offset += parentId.fromBytes(buffer, offset);
@@ -737,10 +783,11 @@ public class TraceContext implements Recyclable {
         discardable = buffer[offset++] == (byte) 1;
         clock.init(ByteUtils.getLong(buffer, offset));
         this.serviceName = serviceName;
+        this.serviceVersion = serviceVersion;
         onMutation();
     }
 
-    public void deserialize(byte[] buffer, @Nullable String serviceName) {
+    public void deserialize(byte[] buffer, @Nullable String serviceName, @Nullable String serviceVersion) {
         int offset = 0;
         offset += traceId.fromBytes(buffer, offset);
         offset += id.fromBytes(buffer, offset);
@@ -749,6 +796,7 @@ public class TraceContext implements Recyclable {
         discardable = buffer[offset++] == (byte) 1;
         clock.init(ByteUtils.getLong(buffer, offset));
         this.serviceName = serviceName;
+        this.serviceVersion = serviceVersion;
         onMutation();
     }
 
@@ -762,6 +810,10 @@ public class TraceContext implements Recyclable {
 
     public boolean traceIdAndIdEquals(byte[] serialized) {
         return id.dataEquals(serialized, traceId.getLength()) && traceId.dataEquals(serialized, 0);
+    }
+
+    public byte getFlags() {
+        return flags;
     }
 
     public interface ChildContextCreator<T> {

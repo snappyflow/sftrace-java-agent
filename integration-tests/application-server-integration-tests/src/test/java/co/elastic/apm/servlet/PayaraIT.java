@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,11 +15,11 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.servlet;
 
 import co.elastic.apm.servlet.tests.CdiApplicationServerTestApp;
+import co.elastic.apm.servlet.tests.JavaxExternalPluginTestApp;
 import co.elastic.apm.servlet.tests.JsfApplicationServerTestApp;
 import co.elastic.apm.servlet.tests.ServletApiTestApp;
 import co.elastic.apm.servlet.tests.TestApp;
@@ -76,6 +71,11 @@ public class PayaraIT extends AbstractServletContainerIntegrationTest {
 
     @Override
     protected Iterable<Class<? extends TestApp>> getTestClasses() {
-        return Arrays.asList(ServletApiTestApp.class, JsfApplicationServerTestApp.class, CdiApplicationServerTestApp.class);
+        return Arrays.asList(
+            ServletApiTestApp.class,
+            JsfApplicationServerTestApp.class,
+            CdiApplicationServerTestApp.class,
+            JavaxExternalPluginTestApp.class
+        );
     }
 }

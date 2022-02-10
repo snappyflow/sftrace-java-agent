@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,7 +15,6 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.metrics.builtin;
 
@@ -29,8 +23,8 @@ import co.elastic.apm.agent.impl.ElasticApmTracer;
 import co.elastic.apm.agent.metrics.DoubleSupplier;
 import co.elastic.apm.agent.metrics.Labels;
 import co.elastic.apm.agent.metrics.MetricRegistry;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import co.elastic.apm.agent.sdk.logging.Logger;
+import co.elastic.apm.agent.sdk.logging.LoggerFactory;
 import org.stagemonitor.util.StringUtils;
 
 import javax.annotation.Nullable;
@@ -179,13 +173,13 @@ public class CGroupMetrics extends AbstractLifecycleListener {
     private CgroupFiles createCgroup2Files(String cgroupLine, File rootCgroupFsPath) throws IOException {
         final String[] cgroupLineParts = StringUtils.split(cgroupLine, ':');
         String sliceSubdir = cgroupLineParts[cgroupLineParts.length - 1];
-        File maxMemoryFile = new File(rootCgroupFsPath, sliceSubdir + File.separatorChar + CGROUP2_MAX_MEMORY);
+        File maxMemoryFile = new File(rootCgroupFsPath, sliceSubdir + System.getProperty("file.separator") + CGROUP2_MAX_MEMORY);
         if (maxMemoryFile.canRead()) {
             maxMemoryFile = getMaxMemoryFile(maxMemoryFile, CGROUP2_UNLIMITED);
             return new CgroupFiles(
                 maxMemoryFile,
-                new File(rootCgroupFsPath, sliceSubdir + File.separator + CGROUP2_USED_MEMORY),
-                new File(rootCgroupFsPath, sliceSubdir + File.separator + CGROUP_MEMORY_STAT)
+                new File(rootCgroupFsPath, sliceSubdir + System.getProperty("file.separator") + CGROUP2_USED_MEMORY),
+                new File(rootCgroupFsPath, sliceSubdir + System.getProperty("file.separator") + CGROUP_MEMORY_STAT)
             );
         }
         return null;
@@ -224,31 +218,6 @@ public class CGroupMetrics extends AbstractLifecycleListener {
 
     void bindTo(MetricRegistry metricRegistry) {
         if (cgroupFiles != null) {
-            metricRegistry.addUnlessNan("system.process.cgroup.memory.stats.inactive_file.bytes", Labels.EMPTY, new DoubleSupplier() {
-                @Override
-                public double get() {
-                    try (BufferedReader fileReaderStatFile = new BufferedReader(new FileReader(cgroupFiles.getStatMemoryFile()))) {
-                        String statLine = fileReaderStatFile.readLine();
-                        String inactiveBytes = null;
-                        while (statLine != null) {
-                            final String[] statLineSplit = StringUtils.split(statLine, ' ');
-                            if (statLineSplit.length > 1) {
-                                if ("total_inactive_file".equals(statLineSplit[0])) {
-                                    inactiveBytes = statLineSplit[1];
-                                    break;
-                                } else if ("inactive_file".equals(statLineSplit[0])) {
-                                    inactiveBytes = statLineSplit[1];
-                                }
-                            }
-                            statLine = fileReaderStatFile.readLine();
-                        }
-                        return inactiveBytes != null ? Long.parseLong(inactiveBytes) : Double.NaN;
-                    } catch (Exception e) {
-                        logger.debug("Failed to read " + cgroupFiles.getStatMemoryFile().getAbsolutePath() + " file", e);
-                        return Double.NaN;
-                    }
-                }
-            });
 
             metricRegistry.addUnlessNan("system.process.cgroup.memory.mem.usage.bytes", Labels.EMPTY, new DoubleSupplier() {
                 @Override
@@ -301,6 +270,10 @@ public class CGroupMetrics extends AbstractLifecycleListener {
             return usedMemoryFile;
         }
 
+        /**
+         * Not used at the moment, but contains useful info, so no harm of leaving without opening and reading from
+         * @return the memory.stat file
+         */
         public File getStatMemoryFile() {
             return statMemoryFile;
         }

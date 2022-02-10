@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,15 +15,16 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.impl;
 
+import co.elastic.apm.agent.common.JvmRuntimeInfo;
 import co.elastic.apm.agent.configuration.CoreConfiguration;
-import co.elastic.apm.agent.configuration.ServiceNameUtil;
-import co.elastic.apm.agent.context.ExecutorServiceShutdownLifecycleListener;
+import co.elastic.apm.agent.configuration.ServiceInfo;
+import co.elastic.apm.agent.context.ClosableLifecycleListenerAdapter;
 import co.elastic.apm.agent.context.LifecycleListener;
 import co.elastic.apm.agent.impl.error.ErrorCapture;
+import co.elastic.apm.agent.impl.metadata.MetaDataFuture;
 import co.elastic.apm.agent.impl.sampling.ProbabilitySampler;
 import co.elastic.apm.agent.impl.sampling.Sampler;
 import co.elastic.apm.agent.impl.stacktrace.StacktraceConfiguration;
@@ -38,6 +34,7 @@ import co.elastic.apm.agent.impl.transaction.Span;
 import co.elastic.apm.agent.impl.transaction.TextHeaderGetter;
 import co.elastic.apm.agent.impl.transaction.TraceContext;
 import co.elastic.apm.agent.impl.transaction.Transaction;
+import co.elastic.apm.agent.logging.LoggingConfiguration;
 import co.elastic.apm.agent.matcher.WildcardMatcher;
 import co.elastic.apm.agent.metrics.MetricRegistry;
 import co.elastic.apm.agent.objectpool.ObjectPool;
@@ -45,20 +42,23 @@ import co.elastic.apm.agent.objectpool.ObjectPoolFactory;
 import co.elastic.apm.agent.report.ApmServerClient;
 import co.elastic.apm.agent.report.Reporter;
 import co.elastic.apm.agent.report.ReporterConfiguration;
-import co.elastic.apm.agent.sdk.weakmap.WeakMapSupplier;
+import co.elastic.apm.agent.sdk.logging.Logger;
+import co.elastic.apm.agent.sdk.logging.LoggerFactory;
+import co.elastic.apm.agent.sdk.weakconcurrent.WeakConcurrent;
+import co.elastic.apm.agent.sdk.weakconcurrent.WeakMap;
 import co.elastic.apm.agent.util.DependencyInjectingServiceLoader;
 import co.elastic.apm.agent.util.ExecutorUtils;
-import com.blogspot.mydailyjava.weaklockfree.WeakConcurrentMap;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.stagemonitor.configuration.ConfigurationOption;
 import org.stagemonitor.configuration.ConfigurationOptionProvider;
 import org.stagemonitor.configuration.ConfigurationRegistry;
 
 import javax.annotation.Nullable;
+import java.io.Closeable;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -73,7 +73,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 public class ElasticApmTracer implements Tracer {
     private static final Logger logger = LoggerFactory.getLogger(ElasticApmTracer.class);
 
-    private static final WeakConcurrentMap<ClassLoader, String> serviceNameByClassLoader = WeakMapSupplier.createMap();
+    private static final WeakMap<ClassLoader, ServiceInfo> serviceInfoByClassLoader = WeakConcurrent.buildMap();
 
     private final ConfigurationRegistry configurationRegistry;
     private final StacktraceConfiguration stacktraceConfiguration;
@@ -110,15 +110,18 @@ public class ElasticApmTracer implements Tracer {
     private volatile TracerState tracerState = TracerState.UNINITIALIZED;
     private volatile boolean currentlyUnderStress = false;
     private volatile boolean recordingConfigOptionSet;
-    private final MetaData metaData;
+    private final String ephemeralId;
+    private final MetaDataFuture metaDataFuture;
 
-    ElasticApmTracer(ConfigurationRegistry configurationRegistry, Reporter reporter, ObjectPoolFactory poolFactory, ApmServerClient apmServerClient, MetaData metaData) {
+    ElasticApmTracer(ConfigurationRegistry configurationRegistry, Reporter reporter, ObjectPoolFactory poolFactory,
+                     ApmServerClient apmServerClient, final String ephemeralId, MetaDataFuture metaDataFuture) {
         this.metricRegistry = new MetricRegistry(configurationRegistry.getConfig(ReporterConfiguration.class));
         this.configurationRegistry = configurationRegistry;
         this.reporter = reporter;
         this.stacktraceConfiguration = configurationRegistry.getConfig(StacktraceConfiguration.class);
         this.apmServerClient = apmServerClient;
-        this.metaData = metaData;
+        this.ephemeralId = ephemeralId;
+        this.metaDataFuture = metaDataFuture;
         int maxPooledElements = configurationRegistry.getConfig(ReporterConfiguration.class).getMaxQueueSize() * 2;
         coreConfiguration = configurationRegistry.getConfig(CoreConfiguration.class);
 
@@ -147,7 +150,6 @@ public class ElasticApmTracer implements Tracer {
         });
         this.activationListeners = DependencyInjectingServiceLoader.load(ActivationListener.class, this);
         sharedPool = ExecutorUtils.createSingleThreadSchedulingDaemonPool("shared");
-        lifecycleListeners.add(new ExecutorServiceShutdownLifecycleListener(sharedPool));
 
         // sets the assertionsEnabled flag to true if indeed enabled
         //noinspection AssertWithSideEffects
@@ -158,6 +160,12 @@ public class ElasticApmTracer implements Tracer {
     @Nullable
     public Transaction startRootTransaction(@Nullable ClassLoader initiatingClassLoader) {
         return startRootTransaction(sampler, -1, initiatingClassLoader);
+    }
+
+    @Override
+    @Nullable
+    public Transaction startRootTransaction(@Nullable ClassLoader initiatingClassLoader, long epochMicro) {
+        return startRootTransaction(sampler, epochMicro, initiatingClassLoader);
     }
 
     @Override
@@ -175,6 +183,12 @@ public class ElasticApmTracer implements Tracer {
     @Nullable
     public <C> Transaction startChildTransaction(@Nullable C headerCarrier, TextHeaderGetter<C> textHeadersGetter, @Nullable ClassLoader initiatingClassLoader) {
         return startChildTransaction(headerCarrier, textHeadersGetter, sampler, -1, initiatingClassLoader);
+    }
+
+    @Override
+    @Nullable
+    public <C> Transaction startChildTransaction(@Nullable C headerCarrier, TextHeaderGetter<C> textHeadersGetter, @Nullable ClassLoader initiatingClassLoader, long epochMicros) {
+        return startChildTransaction(headerCarrier, textHeadersGetter, sampler, epochMicros, initiatingClassLoader);
     }
 
     @Override
@@ -211,15 +225,16 @@ public class ElasticApmTracer implements Tracer {
 
     private void afterTransactionStart(@Nullable ClassLoader initiatingClassLoader, Transaction transaction) {
         if (logger.isDebugEnabled()) {
-            logger.debug("startTransaction {} {", transaction);
+            logger.debug("startTransaction {}", transaction);
             if (logger.isTraceEnabled()) {
                 logger.trace("starting transaction at",
                     new RuntimeException("this exception is just used to record where the transaction has been started from"));
             }
         }
-        final String serviceName = getServiceName(initiatingClassLoader);
-        if (serviceName != null) {
-            transaction.getTraceContext().setServiceName(serviceName);
+        final ServiceInfo serviceInfo = getServiceInfo(initiatingClassLoader);
+        if (serviceInfo != null) {
+            transaction.getTraceContext().setServiceName(serviceInfo.getServiceName());
+            transaction.getTraceContext().setServiceVersion(serviceInfo.getServiceVersion());
         }
     }
 
@@ -317,6 +332,9 @@ public class ElasticApmTracer implements Tracer {
             error.setException(e);
             Transaction currentTransaction = currentTransaction();
             if (currentTransaction != null) {
+                if (currentTransaction.getNameForSerialization().length() > 0) {
+                    error.setTransactionName(currentTransaction.getNameForSerialization());
+                }
                 error.setTransactionType(currentTransaction.getType());
                 error.setTransactionSampled(currentTransaction.isSampled());
             }
@@ -326,7 +344,11 @@ public class ElasticApmTracer implements Tracer {
                 parent.setNonDiscardable();
             } else {
                 error.getTraceContext().getId().setToRandomValue();
-                error.getTraceContext().setServiceName(getServiceName(initiatingClassLoader));
+                ServiceInfo serviceInfo = getServiceInfo(initiatingClassLoader);
+                if (serviceInfo != null) {
+                    error.getTraceContext().setServiceName(serviceInfo.getServiceName());
+                    error.getTraceContext().setServiceVersion(serviceInfo.getServiceVersion());
+                }
             }
             return error;
         }
@@ -349,7 +371,8 @@ public class ElasticApmTracer implements Tracer {
                     new RuntimeException("this exception is just used to record where the transaction has been ended from"));
             }
         }
-        if (!transaction.isNoop()) {
+        if (!transaction.isNoop() &&
+            (transaction.isSampled() || apmServerClient.supportsKeepingUnsampledTransaction())) {
             // we do report non-sampled transactions (without the context)
             reporter.report(transaction);
         } else {
@@ -389,9 +412,10 @@ public class ElasticApmTracer implements Tracer {
         }
         // makes sure that parents are also non-discardable
         span.setNonDiscardable();
-        long spanFramesMinDurationMs = stacktraceConfiguration.getSpanFramesMinDurationMs();
-        if (spanFramesMinDurationMs != 0 && span.isSampled() && span.getStackFrames() == null) {
-            if (span.getDurationMs() >= spanFramesMinDurationMs) {
+
+        long spanStackTraceMinDurationMs = stacktraceConfiguration.getSpanStackTraceMinDurationMs();
+        if (spanStackTraceMinDurationMs >= 0 && span.isSampled() && span.getStackFrames() == null) {
+            if (span.getDurationMs() >= spanStackTraceMinDurationMs) {
                 span.withStacktrace(new Throwable());
             }
         }
@@ -415,15 +439,10 @@ public class ElasticApmTracer implements Tracer {
     }
 
     public synchronized void stop() {
-        tracerState = TracerState.STOPPED;
-        logger.info("Tracer switched to STOPPED state");
-        try {
-            configurationRegistry.close();
-            reporter.close();
-        } catch (Exception e) {
-            logger.warn("Suppressed exception while calling stop()", e);
+        if (tracerState == TracerState.STOPPED) {
+            // may happen if explicitly stopped in a unit test and executed again within a shutdown hook
+            return;
         }
-
         for (LifecycleListener lifecycleListener : lifecycleListeners) {
             try {
                 lifecycleListener.stop();
@@ -431,6 +450,20 @@ public class ElasticApmTracer implements Tracer {
                 logger.warn("Suppressed exception while calling stop()", e);
             }
         }
+        ExecutorUtils.shutdownAndWaitTermination(sharedPool);
+        tracerState = TracerState.STOPPED;
+        logger.info("Tracer switched to STOPPED state");
+        if (logger.isDebugEnabled()) {
+            logger.debug("Tracer stop stack trace: ", new Throwable("Expected - for debugging purposes"));
+        }
+
+        try {
+            configurationRegistry.close();
+            reporter.close();
+        } catch (Exception e) {
+            logger.warn("Suppressed exception while calling stop()", e);
+        }
+        LoggingConfiguration.shutdown();
     }
 
     public Reporter getReporter() {
@@ -496,8 +529,15 @@ public class ElasticApmTracer implements Tracer {
         }
     }
 
+    /**
+     * Starts the tracer. Depending on several environment and setup parameters, the tracer may be started synchronously
+     * on this thread, or its start may be delayed and invoked on a dedicated thread.
+     *
+     * @param premain true if this tracer is attached through the {@code premain()} method (i.e. using the `javaagent`
+     *                jvm parameter); false otherwise
+     */
     public synchronized void start(boolean premain) {
-        long delayInitMs = getConfig(CoreConfiguration.class).getDelayInitMs();
+        long delayInitMs = getConfig(CoreConfiguration.class).getDelayTracerStartMs();
         if (premain && shouldDelayOnPremain()) {
             delayInitMs = Math.max(delayInitMs, 5000L);
         }
@@ -509,9 +549,7 @@ public class ElasticApmTracer implements Tracer {
     }
 
     private boolean shouldDelayOnPremain() {
-        String javaVersion = System.getProperty("java.version");
-        return javaVersion != null &&
-            (javaVersion.startsWith("1.7") || javaVersion.startsWith("1.8")) &&
+        return JvmRuntimeInfo.ofCurrentVM().getMajorVersion() <= 8 &&
             ClassLoader.getSystemClassLoader().getResource("org/apache/catalina/startup/Bootstrap.class") != null;
     }
 
@@ -623,6 +661,16 @@ public class ElasticApmTracer implements Tracer {
     }
 
     @Override
+    @Nullable
+    public Span createExitChildSpan() {
+        AbstractSpan<?> active = getActive();
+        if (active == null) {
+            return null;
+        }
+        return active.createExitSpan();
+    }
+
+    @Override
     public TracerState getState() {
         return tracerState;
     }
@@ -693,42 +741,60 @@ public class ElasticApmTracer implements Tracer {
         return metricRegistry;
     }
 
+    public List<ServiceInfo> getServiceInfoOverrides() {
+        List<ServiceInfo> serviceInfos = new ArrayList<>(serviceInfoByClassLoader.approximateSize());
+        for (Map.Entry<ClassLoader, ServiceInfo> entry : serviceInfoByClassLoader) {
+            serviceInfos.add(entry.getValue());
+        }
+        return serviceInfos;
+    }
+
     @Override
-    public void overrideServiceNameForClassLoader(@Nullable ClassLoader classLoader, @Nullable String serviceName) {
-        // overriding the service name for the bootstrap class loader is not an actual use-case
+    public void overrideServiceInfoForClassLoader(@Nullable ClassLoader classLoader, ServiceInfo serviceInfo) {
+        // overriding the service name/version for the bootstrap class loader is not an actual use-case
         // null may also mean we don't know about the initiating class loader
         if (classLoader == null
-            || serviceName == null || serviceName.isEmpty()
+            || !serviceInfo.hasServiceName()
             // if the service name is set explicitly, don't override it
             || coreConfiguration.getServiceNameConfig().getUsedKey() != null) {
             return;
         }
-        if (!serviceNameByClassLoader.containsKey(classLoader)) {
-            serviceNameByClassLoader.putIfAbsent(classLoader, ServiceNameUtil.replaceDisallowedChars(serviceName));
+
+        logger.debug("Using `{}` as the service name and `{}` as the service version for class loader [{}]", serviceInfo.getServiceName(), serviceInfo.getServiceVersion(), classLoader);
+        if (!serviceInfoByClassLoader.containsKey(classLoader)) {
+            serviceInfoByClassLoader.putIfAbsent(classLoader, serviceInfo);
         }
     }
 
     @Nullable
-    private String getServiceName(@Nullable ClassLoader initiatingClassLoader) {
+    public ServiceInfo getServiceInfo(@Nullable ClassLoader initiatingClassLoader) {
         if (initiatingClassLoader == null) {
             return null;
         }
-        return serviceNameByClassLoader.get(initiatingClassLoader);
+        return serviceInfoByClassLoader.get(initiatingClassLoader);
     }
 
-    public void resetServiceNameOverrides() {
-        serviceNameByClassLoader.clear();
+    public void resetServiceInfoOverrides() {
+        serviceInfoByClassLoader.clear();
     }
 
     public ApmServerClient getApmServerClient() {
         return apmServerClient;
     }
 
-    public MetaData getMetaData() {
-        return metaData;
+    public String getEphemeralId() {
+        return ephemeralId;
+    }
+
+    public MetaDataFuture getMetaDataFuture() {
+        return metaDataFuture;
     }
 
     public ScheduledThreadPoolExecutor getSharedSingleThreadedPool() {
         return sharedPool;
+    }
+
+    public void addShutdownHook(Closeable closeable) {
+        lifecycleListeners.add(ClosableLifecycleListenerAdapter.of(closeable));
     }
 }

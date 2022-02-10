@@ -7,7 +7,7 @@
 	<parent>
 		<groupId>co.elastic.apm</groupId>
 		<artifactId>apm-agent-plugins</artifactId>
-		<version>1.18.0</version>
+		<version>1.29.0</version>
 	</parent>
 	<artifactId>apm-hibernate-plugin</artifactId>
 	<name>${project.groupId}:${project.artifactId}</name>
@@ -22,8 +22,7 @@
 		<dependency>
 			<groupId>org.hibernate</groupId>
 			<artifactId>hibernate-core</artifactId>
-			<version>5.5.4.Final</version>
-			<scope>provided</scope>
+			<version>5.6.5.Final</version>
 		</dependency>
 	</dependencies>
 

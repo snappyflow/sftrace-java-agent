@@ -5,7 +5,7 @@
     <parent>
         <artifactId>apm-redis-plugin</artifactId>
         <groupId>co.elastic.apm</groupId>
-        <version>1.18.0</version>
+        <version>1.29.0</version>
     </parent>
 
     <artifactId>apm-redisson-plugin</artifactId>
@@ -32,12 +32,17 @@
         <dependency>
             <groupId>org.redisson</groupId>
             <artifactId>redisson</artifactId>
-            <version>3.12.3</version>
+            <!-- note: previous versions don't work with Java 15+ -->
+            <version>3.13.0</version>
             <scope>provided</scope>
             <exclusions>
                 <exclusion>
                     <groupId>net.bytebuddy</groupId>
                     <artifactId>byte-buddy</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>com.fasterxml.jackson.core</groupId>
+                    <artifactId>jackson-core</artifactId>
                 </exclusion>
             </exclusions>
         </dependency>

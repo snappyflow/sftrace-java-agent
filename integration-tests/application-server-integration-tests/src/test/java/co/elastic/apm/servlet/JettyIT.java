@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,63 +15,36 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.servlet;
 
+import co.elastic.apm.servlet.tests.JavaxExternalPluginTestApp;
 import co.elastic.apm.servlet.tests.JsfServletContainerTestApp;
 import co.elastic.apm.servlet.tests.ServletApiTestApp;
 import co.elastic.apm.servlet.tests.TestApp;
-import org.jetbrains.annotations.NotNull;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
-import org.testcontainers.containers.GenericContainer;
 
 import java.util.Arrays;
-import java.util.List;
 
 @RunWith(Parameterized.class)
-public class JettyIT extends AbstractServletContainerIntegrationTest {
-
-    private String version;
+public class JettyIT extends AbstractJettyIT {
 
     public JettyIT(final String version) {
-        super(new GenericContainer<>("jetty:" + version)
-                .withExposedPorts(8080),
-            "jetty-application",
-            "/var/lib/jetty/webapps",
-            "jetty");
-
-        this.version = version;
+        super(version);
     }
 
     @Parameterized.Parameters(name = "Jetty {0}")
     public static Iterable<Object[]> data() {
-        return Arrays.asList(new Object[][]{{"9.2"}, {"9.3"}, {"9.4"}});
-    }
-
-    @Override
-    protected void enableDebugging(GenericContainer<?> servletContainer) {
-        servletContainer.withEnv("JAVA_OPTIONS", "-Xrunjdwp:transport=dt_socket,server=y,suspend=y,address=5005");
-    }
-
-    @NotNull
-    public List<String> getPathsToTestErrors() {
-        return Arrays.asList("/index.jsp", "/servlet", "/async-dispatch-servlet");
-    }
-
-    @Override
-    public boolean isExpectedStacktrace(String path) {
-        return !path.equals("/async-dispatch-servlet");
+        return Arrays.asList(new Object[][]{{"9.2"}, {"9.3"}, {"9.4"}, {"10.0.6"}, {"10.0.6-jdk11"}, {"10.0.6-jdk16"}});
     }
 
     @Override
     protected Iterable<Class<? extends TestApp>> getTestClasses() {
-        return Arrays.asList(ServletApiTestApp.class, JsfServletContainerTestApp.class);
-    }
-
-    @Override
-    protected boolean runtimeAttach() {
-        return true;
+        return Arrays.asList(
+            ServletApiTestApp.class,
+            JsfServletContainerTestApp.class,
+            JavaxExternalPluginTestApp.class
+        );
     }
 }

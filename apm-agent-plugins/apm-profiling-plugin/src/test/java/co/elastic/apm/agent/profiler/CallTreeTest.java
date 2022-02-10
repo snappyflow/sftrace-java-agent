@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2019 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,7 +15,6 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.profiler;
 
@@ -38,13 +32,18 @@ import co.elastic.apm.agent.impl.transaction.Transaction;
 import co.elastic.apm.agent.objectpool.NoopObjectPool;
 import co.elastic.apm.agent.objectpool.ObjectPool;
 import co.elastic.apm.agent.objectpool.impl.ListBasedObjectPool;
+import co.elastic.apm.agent.testutils.DisabledOnAppleSilicon;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.stagemonitor.configuration.ConfigurationRegistry;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -57,9 +56,10 @@ import java.util.stream.Collectors;
 
 import static java.util.stream.Collectors.toMap;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+@DisabledOnOs(OS.WINDOWS)
+@DisabledOnAppleSilicon
 class CallTreeTest {
 
     private MockReporter reporter;
@@ -77,14 +77,15 @@ class CallTreeTest {
     }
 
     @AfterEach
-    void tearDown() {
+    void tearDown() throws IOException {
+        Objects.requireNonNull(tracer.getLifecycleListener(ProfilingFactory.class)).getProfiler().clear();
         tracer.stop();
     }
 
     @Test
-    void testCallTree() throws Exception {
-        TraceContext traceContext = TraceContext.with64BitId(mock(ElasticApmTracer.class));
-        CallTree.Root root = CallTree.createRoot(NoopObjectPool.ofRecyclable(() -> new CallTree.Root(tracer)), traceContext.serialize(), traceContext.getServiceName(), 0);
+    void testCallTree() {
+        TraceContext traceContext = TraceContext.with64BitId(MockTracer.create());
+        CallTree.Root root = CallTree.createRoot(NoopObjectPool.ofRecyclable(() -> new CallTree.Root(tracer)), traceContext.serialize(), traceContext.getServiceName(), traceContext.getServiceVersion(), 0);
         ObjectPool<CallTree> callTreePool = ListBasedObjectPool.ofRecyclable(new ArrayList<>(), Integer.MAX_VALUE, CallTree::new);
         root.addStackTrace(tracer, List.of(StackFrame.of("A", "a")), 0, callTreePool, 0);
         root.addStackTrace(tracer, List.of(StackFrame.of("A", "b"), StackFrame.of("A", "a")), TimeUnit.MILLISECONDS.toNanos(10), callTreePool, 0);
@@ -786,6 +787,28 @@ class CallTreeTest {
         });
     }
 
+    /*
+     * [1   ]     [1   ]
+     *  [2]   ->   [a ]
+     *   [a]       [2]
+     *
+     * Note: this test is currently failing
+     */
+    @Test
+    @Disabled("fix me")
+    void testNestedActivationBeforeCallTree() throws Exception {
+        assertCallTree(new String[]{
+            "  aaa ",
+            "12 2 1"
+        }, new Object[][]{
+            {"a",     3},
+        }, new Object[][]{
+            {"1",     5},
+            {"  a",   3}, // a is actually a child of the transaction
+            {"    2", 2}, // 2 is not within the child_ids of a
+        });
+    }
+
     private void assertCallTree(String[] stackTraces, Object[][] expectedTree) throws Exception {
         assertCallTree(stackTraces, expectedTree, null);
     }
@@ -878,6 +901,8 @@ class CallTreeTest {
 
     public static CallTree.Root getCallTree(ElasticApmTracer tracer, String[] stackTraces) throws Exception {
         ProfilingFactory profilingFactory = tracer.getLifecycleListener(ProfilingFactory.class);
+        assertThat(profilingFactory).isNotNull();
+
         SamplingProfiler profiler = profilingFactory.getProfiler();
         FixedNanoClock nanoClock = (FixedNanoClock) profilingFactory.getNanoClock();
         nanoClock.setNanoTime(0);
@@ -921,7 +946,6 @@ class CallTreeTest {
         transaction.deactivate().end(nanoClock.nanoTime() / 1000);
         assertThat(root).isNotNull();
         root.end(callTreePool, 0);
-        profiler.clear();
         return root;
     }
 

@@ -1,0 +1,2 @@
+co.elastic.apm.agent.struts.ActionProxyInstrumentation
+co.elastic.apm.agent.struts.ExecuteOperationsInstrumentation

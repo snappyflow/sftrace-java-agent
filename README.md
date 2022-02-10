@@ -1,5 +1,5 @@
-[![Build Status](https://apm-ci.elastic.co/buildStatus/icon?job=apm-agent-java%2Fapm-agent-java-mbp%2Fmaster)](https://apm-ci.elastic.co/job/apm-agent-java/job/apm-agent-java-mbp/job/master/)
-[![codecov](https://codecov.io/gh/elastic/apm-agent-java/branch/master/graph/badge.svg)](https://codecov.io/gh/elastic/apm-agent-java)
+[![Build Status](https://apm-ci.elastic.co/buildStatus/icon?job=apm-agent-java%2Fapm-agent-java-mbp%2Fmain)](https://apm-ci.elastic.co/job/apm-agent-java/job/apm-agent-java-mbp/job/main/)
+[![codecov](https://codecov.io/gh/elastic/apm-agent-java/branch/main/graph/badge.svg)](https://codecov.io/gh/elastic/apm-agent-java)
 [![Maven Central](https://img.shields.io/maven-central/v/co.elastic.apm/apm-agent-api.svg)](https://search.maven.org/search?q=g:co.elastic.apm%20AND%20a:elastic-apm-agent)
 
 # apm-agent-java
@@ -22,7 +22,7 @@ If you find a bug or an issue, please
 
 Please note that we reserve GitHub tickets for actionable things we can work on, thus confirmed bugs and enhancement requests only.
 
-Help requests are better served in [APM discuss forum](https://discuss.elastic.co/tags/c/apm/java).
+Help requests are better served in [APM discuss forum](https://discuss.elastic.co/tags/c/observability/apm/58/java).
 
 ## Contributing
 
@@ -30,9 +30,14 @@ See the [contributing documentation](CONTRIBUTING.md)
 
 ## Snapshots
 
-Snapshots are built from `master` branch and are available [here](https://oss.sonatype.org/service/local/artifact/maven/redirect?r=snapshots&g=co.elastic.apm&a=elastic-apm-agent&v=LATEST).
+Snapshots are built from `main` branch and are available here:
 
-Those snapshots include features & bugfixes for the next release, see [releases notes](https://www.elastic.co/guide/en/apm/agent/java/master/_unreleased.html) details.
+* [elastic-apm-agent.jar](https://oss.sonatype.org/service/local/artifact/maven/redirect?r=snapshots&g=co.elastic.apm&a=elastic-apm-agent&v=LATEST)
+* [apm-agent-attach-cli.jar](https://oss.sonatype.org/service/local/artifact/maven/redirect?r=snapshots&g=co.elastic.apm&a=apm-agent-attach-cli&v=LATEST)
+* [apm-agent-attach.jar](https://oss.sonatype.org/service/local/artifact/maven/redirect?r=snapshots&g=co.elastic.apm&a=apm-agent-attach&v=LATEST)
+* [apm-agent-api.jar](https://oss.sonatype.org/service/local/artifact/maven/redirect?r=snapshots&g=co.elastic.apm&a=apm-agent-api&v=LATEST)
+
+Those snapshots include features & bugfixes for the next release, see [releases notes](https://www.elastic.co/guide/en/apm/agent/java/main/_unreleased.html) details.
 
 ## Build form source
 

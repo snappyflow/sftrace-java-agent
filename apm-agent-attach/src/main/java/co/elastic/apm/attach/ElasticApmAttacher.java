@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,25 +15,18 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.attach;
 
+import co.elastic.apm.agent.common.util.ResourceExtractionUtil;
 import net.bytebuddy.agent.ByteBuddyAgent;
 
+import javax.annotation.Nullable;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.math.BigInteger;
-import java.nio.channels.FileChannel;
-import java.nio.channels.FileLock;
-import java.security.DigestInputStream;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.Map;
 import java.util.Properties;
 
@@ -67,7 +55,7 @@ public class ElasticApmAttacher {
      * @throws IllegalStateException if there was a problem while attaching the agent to this VM
      */
     public static void attach() {
-        attach(loadProperties("elasticapm.properties"));
+        attach(loadPropertiesFromClasspath("elasticapm.properties"));
     }
 
     /**
@@ -76,15 +64,15 @@ public class ElasticApmAttacher {
      * This method may only be invoked once.
      * </p>
      *
-     * @throws IllegalStateException if there was a problem while attaching the agent to this VM
      * @param propertiesLocation the location within the classpath which contains the agent configuration properties file
+     * @throws IllegalStateException if there was a problem while attaching the agent to this VM
      * @since 1.11.0
      */
     public static void attach(String propertiesLocation) {
-        attach(loadProperties(propertiesLocation));
+        attach(loadPropertiesFromClasspath(propertiesLocation));
     }
 
-    private static Map<String, String> loadProperties(String propertiesLocation) {
+    private static Map<String, String> loadPropertiesFromClasspath(String propertiesLocation) {
         Map<String, String> propertyMap = new HashMap<>();
         final Properties props = new Properties();
         try (InputStream resourceStream = ElasticApmAttacher.class.getClassLoader().getResourceAsStream(propertiesLocation)) {
@@ -110,16 +98,28 @@ public class ElasticApmAttacher {
      * @throws IllegalStateException if there was a problem while attaching the agent to this VM
      */
     public static void attach(Map<String, String> configuration) {
+        // optimization, this is checked in AgentMain#init again
+        if (Boolean.getBoolean("ElasticApm.attached")) {
+            return;
+        }
         attach(ByteBuddyAgent.ProcessProvider.ForCurrentVm.INSTANCE.resolve(), configuration);
     }
 
-    static File createTempProperties(Map<String, String> configuration) {
+    /**
+     * Store configuration to a temporary file
+     *
+     * @param configuration agent configuration
+     * @param folder        temporary folder, use {@literal null} to use default
+     * @return created file if any, {@literal null} if none was created
+     */
+    static File createTempProperties(Map<String, String> configuration, @Nullable File folder) {
         File tempFile = null;
         if (!configuration.isEmpty()) {
             Properties properties = new Properties();
             properties.putAll(configuration);
+
             try {
-                tempFile = File.createTempFile("elstcapm", ".tmp");
+                tempFile = File.createTempFile("elstcapm", ".tmp", folder);
                 try (FileOutputStream outputStream = new FileOutputStream(tempFile)) {
                     properties.store(outputStream, null);
                 }
@@ -130,18 +130,6 @@ public class ElasticApmAttacher {
         return tempFile;
     }
 
-    static String toAgentArgs(Map<String, String> configuration) {
-        StringBuilder args = new StringBuilder();
-        for (Iterator<Map.Entry<String, String>> iterator = configuration.entrySet().iterator(); iterator.hasNext(); ) {
-            Map.Entry<String, String> entry = iterator.next();
-            args.append(entry.getKey()).append('=').append(entry.getValue());
-            if (iterator.hasNext()) {
-                args.append(';');
-            }
-        }
-        return args.toString();
-    }
-
     /**
      * Attaches the agent to a remote JVM
      *
@@ -149,17 +137,44 @@ public class ElasticApmAttacher {
      * @param configuration the agent configuration
      */
     public static void attach(String pid, Map<String, String> configuration) {
-        // optimization, this is checked in AgentMain#init again
-        if (Boolean.getBoolean("ElasticApm.attached")) {
-            return;
-        }
-        File tempFile = createTempProperties(configuration);
+        attach(pid, configuration, AgentJarFileHolder.INSTANCE.agentJarFile);
+    }
+
+    /**
+     * Attaches the agent to a remote JVM
+     *
+     * @param pid           the PID of the JVM the agent should be attached on
+     * @param configuration the agent configuration
+     * @param agentJarFile  the agent jar file
+     */
+    public static void attach(String pid, Map<String, String> configuration, File agentJarFile) {
+        File tempFile = createTempProperties(configuration, null);
         String agentArgs = tempFile == null ? null : TEMP_PROPERTIES_FILE_KEY + "=" + tempFile.getAbsolutePath();
 
-        ByteBuddyAgent.attach(AgentJarFileHolder.INSTANCE.agentJarFile, pid, agentArgs, ElasticAttachmentProvider.get());
+        attachWithFallback(agentJarFile, pid, agentArgs);
         if (tempFile != null) {
             if (!tempFile.delete()) {
                 tempFile.deleteOnExit();
+            }
+        }
+    }
+
+    private static void attachWithFallback(File agentJarFile, String pid, String agentArgs) {
+        try {
+            // while the native providers may report to be supported and appear to work properly, in practice there are
+            // cases (Docker without '--init' option on some JDK images like 'openjdk:8-jdk-alpine') where the accessor
+            // returned by the provider will not work as expected at attachment time.
+            ByteBuddyAgent.attach(agentJarFile, pid, agentArgs, ElasticAttachmentProvider.get());
+        } catch (RuntimeException e1) {
+            try {
+                ByteBuddyAgent.attach(agentJarFile, pid, agentArgs, ElasticAttachmentProvider.getFallback());
+            } catch (RuntimeException e2) {
+                // output the two exceptions for debugging
+                System.err.println("Unable to attach with fallback provider:");
+                e2.printStackTrace();
+
+                System.err.println("Unable to attach with regular provider:");
+                e1.printStackTrace();
             }
         }
     }
@@ -173,57 +188,25 @@ public class ElasticApmAttacher {
      */
     @Deprecated
     public static void attach(String pid, String agentArgs) {
-        ByteBuddyAgent.attach(AgentJarFileHolder.INSTANCE.agentJarFile, pid, agentArgs, ElasticAttachmentProvider.get());
+        attachWithFallback(AgentJarFileHolder.INSTANCE.agentJarFile, pid, agentArgs);
+    }
+
+    public static File getBundledAgentJarFile() {
+        return AgentJarFileHolder.INSTANCE.agentJarFile;
     }
 
     private enum AgentJarFileHolder {
         INSTANCE;
 
-        // initializes lazily and ensures it's only loaded once
+        // initializes lazily and ensures its only loaded once
         final File agentJarFile = getAgentJarFile();
 
-        /**
-         * {@see co.elastic.apm.agent.util.IOUtils#exportResourceToTemp(java.lang.String, java.lang.String, java.lang.String)} who share the same code.
-         */
         private static File getAgentJarFile() {
-            try (InputStream agentJar = ElasticApmAttacher.class.getResourceAsStream("/elastic-apm-agent.jar")) {
-                if (agentJar == null) {
-                    throw new IllegalStateException("Agent jar not found");
-                }
-                String hash = md5Hash(ElasticApmAttacher.class.getResourceAsStream("/elastic-apm-agent.jar"));
-                File tempAgentJar = new File(System.getProperty("java.io.tmpdir"), "elastic-apm-agent-" + hash + ".jar");
-                if (!tempAgentJar.exists()) {
-                    try (FileOutputStream out = new FileOutputStream(tempAgentJar)) {
-                        FileChannel channel = out.getChannel();
-                        // If multiple JVM start on same compute, they can write in same file
-                        // and this file will be corrupted.
-                        try (FileLock ignored = channel.lock()) {
-                            if (tempAgentJar.length() == 0) {
-                                byte[] buffer = new byte[1024];
-                                for (int length; (length = agentJar.read(buffer)) != -1; ) {
-                                    out.write(buffer, 0, length);
-                                }
-                            }
-                        }
-                    }
-                } else if (!md5Hash(new FileInputStream(tempAgentJar)).equals(hash)) {
-                    throw new IllegalStateException("Invalid MD5 checksum of " + tempAgentJar + ". Please delete this file.");
-                }
-                return tempAgentJar;
-            } catch (NoSuchAlgorithmException | IOException e) {
-                throw new IllegalStateException(e);
+            if (ElasticApmAttacher.class.getResource("/elastic-apm-agent.jar") == null) {
+                return null;
             }
-        }
-
-    }
-
-    static String md5Hash(InputStream resourceAsStream) throws IOException, NoSuchAlgorithmException {
-        try (InputStream agentJar = resourceAsStream) {
-            MessageDigest md = MessageDigest.getInstance("MD5");
-            byte[] buffer = new byte[1024];
-            DigestInputStream dis = new DigestInputStream(agentJar, md);
-            while (dis.read(buffer) != -1) {}
-            return String.format("%032x", new BigInteger(1, md.digest()));
+            return ResourceExtractionUtil.extractResourceToTempDirectory("elastic-apm-agent.jar", "elastic-apm-agent", ".jar").toFile();
         }
     }
+
 }

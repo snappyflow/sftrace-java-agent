@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2020 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -11,19 +6,19 @@
  * the Apache License, Version 2.0 (the "License"); you may
  * not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *   http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent;
 
+import co.elastic.test.ChildFirstURLClassLoader;
 import org.apache.ivy.Ivy;
 import org.apache.ivy.core.module.descriptor.DefaultDependencyDescriptor;
 import org.apache.ivy.core.module.descriptor.DefaultModuleDescriptor;
@@ -50,7 +45,6 @@ import java.net.URLClassLoader;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.Enumeration;
 import java.util.List;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
@@ -74,14 +68,18 @@ public class TestClassWithDependencyRunner {
     }
 
     public TestClassWithDependencyRunner(List<String> dependencies, Class<?> testClass, Class<?>... classesReferencingDependency) throws Exception {
+        this(dependencies, testClass.getName(), Arrays.stream(classesReferencingDependency).map(Class::getName).toArray(String[]::new));
+    }
+
+    public TestClassWithDependencyRunner(List<String> dependencies, String testClass, String... classesReferencingDependency) throws Exception {
         List<URL> urls = resolveArtifacts(dependencies);
-        List<Class<?>> classesToExport = new ArrayList<>();
+        List<String> classesToExport = new ArrayList<>();
         classesToExport.add(testClass);
         classesToExport.addAll(Arrays.asList(classesReferencingDependency));
         urls.add(exportToTempJarFile(classesToExport));
 
         URLClassLoader testClassLoader = new ChildFirstURLClassLoader(urls);
-        testRunner = new BlockJUnit4ClassRunner(testClassLoader.loadClass(testClass.getName()));
+        testRunner = new BlockJUnit4ClassRunner(testClassLoader.loadClass(testClass));
         classLoader = new WeakReference<>(testClassLoader);
     }
 
@@ -105,14 +103,15 @@ public class TestClassWithDependencyRunner {
         assertThat(classLoader.get()).isNull();
     }
 
-    private static URL exportToTempJarFile(List<Class<?>> classes) throws IOException {
+    private static URL exportToTempJarFile(List<String> classes) throws IOException {
         File tempTestJar = File.createTempFile("temp-test", ".jar");
         tempTestJar.deleteOnExit();
         try (JarOutputStream jarOutputStream = new JarOutputStream(new FileOutputStream(tempTestJar))) {
-            for (Class<?> clazz : classes) {
-                InputStream inputStream = clazz.getResourceAsStream('/' + clazz.getName().replace('.', '/') + ".class");
+            for (String clazz : classes) {
+                String resourceName = clazz.replace('.', '/') + ".class";
+                InputStream inputStream = ClassLoader.getSystemClassLoader().getResourceAsStream(resourceName);
                 try (inputStream) {
-                    jarOutputStream.putNextEntry(new JarEntry(clazz.getName().replace('.', '/') + ".class"));
+                    jarOutputStream.putNextEntry(new JarEntry(resourceName));
                     byte[] buffer = new byte[1024];
                     int index;
                     while ((index = inputStream.read(buffer)) != -1) {
@@ -175,62 +174,5 @@ public class TestClassWithDependencyRunner {
         }
         assertThat(resolvedDependencies).hasSizeGreaterThanOrEqualTo(dependencies.size());
         return resolvedDependencies;
-    }
-
-    private static class ChildFirstURLClassLoader extends URLClassLoader {
-
-        private final List<URL> urls;
-
-        public ChildFirstURLClassLoader(List<URL> urls) {
-            super(urls.toArray(new URL[]{}));
-            this.urls = urls;
-        }
-
-        @Override
-        public String getName() {
-            return "Test class class loader: " + urls;
-        }
-
-        @Override
-        protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
-            synchronized (getClassLoadingLock(name)) {
-                try {
-                    // First, check if the class has already been loaded
-                    Class<?> c = findLoadedClass(name);
-                    if (c == null) {
-                        c = findClass(name);
-                        if (resolve) {
-                            resolveClass(c);
-                        }
-                    }
-                    return c;
-                } catch (ClassNotFoundException e) {
-                    return super.loadClass(name, resolve);
-                }
-            }
-        }
-
-
-        @Override
-        public URL findResource(String name) {
-            return super.findResource(name);
-        }
-
-        @Override
-        public Enumeration<URL> getResources(String name) throws IOException {
-            Enumeration<URL> resources = super.getResources(name);
-            List<URL> resourcesList = new ArrayList<>();
-            while (resources.hasMoreElements()) {
-                resourcesList.add(resources.nextElement());
-            }
-            Collections.reverse(resourcesList);
-            return Collections.enumeration(resourcesList);
-        }
-
-        @Override
-        public String toString() {
-            return getName();
-        }
-
     }
 }

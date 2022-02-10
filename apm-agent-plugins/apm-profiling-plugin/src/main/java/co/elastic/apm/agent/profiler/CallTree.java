@@ -1,9 +1,4 @@
-/*-
- * #%L
- * Elastic APM Java agent
- * %%
- * Copyright (C) 2018 - 2019 Elastic and contributors
- * %%
+/*
  * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -20,7 +15,6 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * #L%
  */
 package co.elastic.apm.agent.profiler;
 
@@ -32,8 +26,8 @@ import co.elastic.apm.agent.impl.transaction.TraceContext;
 import co.elastic.apm.agent.objectpool.ObjectPool;
 import co.elastic.apm.agent.objectpool.Recyclable;
 import co.elastic.apm.agent.profiler.collections.LongHashSet;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import co.elastic.apm.agent.sdk.logging.Logger;
+import co.elastic.apm.agent.sdk.logging.LoggerFactory;
 
 import javax.annotation.Nullable;
 import java.io.IOException;
@@ -154,9 +148,9 @@ public class CallTree implements Recyclable {
         return lastSeen < timestamp;
     }
 
-    public static CallTree.Root createRoot(ObjectPool<CallTree.Root> rootPool, byte[] traceContext, @Nullable String serviceName, long nanoTime) {
+    public static CallTree.Root createRoot(ObjectPool<CallTree.Root> rootPool, byte[] traceContext, @Nullable String serviceName, @Nullable String serviceVersion, long nanoTime) {
         CallTree.Root root = rootPool.createInstance();
-        root.set(traceContext, serviceName, nanoTime);
+        root.set(traceContext, serviceName, serviceVersion, nanoTime);
         return root;
     }
 
@@ -436,7 +430,16 @@ public class CallTree implements Recyclable {
         }
     }
 
-    public void recycle(ObjectPool<CallTree> pool) {
+    /**
+     * Recycles this subtree to the provided pool recursively.
+     * Note that this method ends by recycling {@code this} node (i.e. - this subtree root), which means that
+     * <b>the caller of this method should make sure that no reference to this object is held anywhere</b>.
+     * <p>ALSO NOTE: MAKE SURE NOT TO CALL THIS METHOD FOR {@link CallTree.Root} INSTANCES.</p>
+     *
+     * @param pool the pool to which all subtree nodes are to be recycled
+     */
+    public final void recycle(ObjectPool<CallTree> pool) {
+        assert !(this instanceof Root);
         List<CallTree> children = this.children;
         for (int i = 0, size = children.size(); i < size; i++) {
             children.get(i).recycle(pool);
@@ -593,9 +596,9 @@ public class CallTree implements Recyclable {
             this.rootContext = TraceContext.with64BitId(tracer);
         }
 
-        private void set(byte[] traceContext, @Nullable String serviceName, long nanoTime) {
+        private void set(byte[] traceContext, @Nullable String serviceName, @Nullable String serviceVersion, long nanoTime) {
             super.set(null, ROOT_FRAME, nanoTime);
-            this.rootContext.deserialize(traceContext, serviceName);
+            this.rootContext.deserialize(traceContext, serviceName, serviceVersion);
             setActiveSpan(traceContext, nanoTime);
         }
 
@@ -657,7 +660,7 @@ public class CallTree implements Recyclable {
             if (activeSpan == null) {
                 firstFrameAfterActivation = true;
                 activeSpan = TraceContext.with64BitId(tracer);
-                activeSpan.deserialize(activeSpanSerialized, rootContext.getServiceName());
+                activeSpan.deserialize(activeSpanSerialized, rootContext.getServiceName(), rootContext.getServiceVersion());
             }
             previousTopOfStack = topOfStack;
             topOfStack = addFrame(stackTrace, stackTrace.size(), activeSpan, activationTimestamp, nanoTime, callTreePool, minDurationNs, this);
@@ -719,11 +722,21 @@ public class CallTree implements Recyclable {
             return rootContext.getClock().getEpochMicros(nanoTime);
         }
 
-        public void recycle(ObjectPool<CallTree> pool) {
+        /**
+         * Recycles this tree to the provided pools.
+         * First, all child subtrees are recycled recursively to the children pool.
+         * Then, {@code this} root node is recycled to the root pool. This means that <b>the caller of this method
+         * should make sure that no reference to this root object is held anywhere</b>.
+         *
+         * @param childrenPool object pool for all non-root nodes
+         * @param rootPool     object pool for root nodes
+         */
+        public void recycle(ObjectPool<CallTree> childrenPool, ObjectPool<CallTree.Root> rootPool) {
             List<CallTree> children = getChildren();
             for (int i = 0, size = children.size(); i < size; i++) {
-                children.get(i).recycle(pool);
+                children.get(i).recycle(childrenPool);
             }
+            rootPool.recycle(this);
         }
 
         public void end(ObjectPool<CallTree> pool, long minDurationNs) {
@@ -733,8 +746,11 @@ public class CallTree implements Recyclable {
         @Override
         public void resetState() {
             super.resetState();
+            rootContext.resetState();
             activeSpan = null;
             activationTimestamp = -1;
+            Arrays.fill(activeSpanSerialized, (byte) 0);
+            previousTopOfStack = null;
             topOfStack = null;
             activeSet.clear();
         }
