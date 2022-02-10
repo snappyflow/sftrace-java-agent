@@ -68,8 +68,6 @@ public class WebClientExchangeFunctionInstrumentation extends AbstractWebClientI
             if (parent == null) {
                 return null;
             }
-            System.out.println("In Web client advice class");
-            System.out.println("In parent ");
             ClientRequest.Builder builder = ClientRequest.from(clientRequest);
             URI uri = clientRequest.url();
             Span span = HttpClientHelper.startHttpClientSpan(parent, clientRequest.method().name(), uri, uri.getHost());
