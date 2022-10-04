@@ -45,6 +45,7 @@ public class SystemInfo {
 
     private static final String CONTAINER_UID_REGEX = "^[0-9a-fA-F]{64}$";
     private static final String SHORTENED_UUID_PATTERN = "^[0-9a-fA-F]{8}\\-[0-9a-fA-F]{4}\\-[0-9a-fA-F]{4}\\-[0-9a-fA-F]{4}\\-[0-9a-fA-F]{4,}";
+    private static final String AWS_FARGATE_UID_REGEX = "^[0-9a-fA-F]{32}\\-[0-9]{10}$";
     private static final String POD_REGEX = "(?:^/kubepods[\\S]*/pod([^/]+)$)|(?:kubepods[^/]*-pod([^/]+)\\.slice)";
 
     /**
@@ -212,10 +213,22 @@ public class SystemInfo {
         return hostname;
     }
 
+    /**
+     * Returns the hostname from environment variables.
+     * <br/>
+     * Note for Windows: the Windows implementation relies on the COMPUTERNAME environment variable that does not
+     * 100% matches the computer name: the returned value is the "netbios name" in upper-case and limited to the first
+     * 15 characters of the complete computer name returned by {@code hostname} command.
+     *
+     * @param isWindows {@literal true} for Windows
+     * @return computer/host name from environment variables.
+     */
     @Nullable
     static String discoverHostnameThroughEnv(boolean isWindows) {
         String hostname;
         if (isWindows) {
+            // Windows implementation will always return an upper-case name
+            // limited to the 15 first characters of the actual computer name
             hostname = System.getenv("COMPUTERNAME");
         } else {
             hostname = System.getenv("HOSTNAME");
@@ -348,7 +361,10 @@ public class SystemInfo {
 
                 // If the line matched the one of the kubernetes patterns, we assume that the last part is always the container ID.
                 // Otherwise we validate that it is a 64-length hex string
-                if (kubernetes != null || idPart.matches(CONTAINER_UID_REGEX) || idPart.matches(SHORTENED_UUID_PATTERN)) {
+                if (kubernetes != null ||
+                    idPart.matches(CONTAINER_UID_REGEX) ||
+                    idPart.matches(SHORTENED_UUID_PATTERN) ||
+                    idPart.matches(AWS_FARGATE_UID_REGEX))  {
                     container = new Container(idPart);
                 }
             }

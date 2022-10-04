@@ -28,19 +28,27 @@ import co.elastic.apm.agent.objectpool.Recyclable;
 import co.elastic.apm.agent.report.ReporterConfiguration;
 import co.elastic.apm.agent.sdk.logging.Logger;
 import co.elastic.apm.agent.sdk.logging.LoggerFactory;
+import co.elastic.apm.agent.util.LoggerUtils;
 
 import javax.annotation.Nullable;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
-public abstract class AbstractSpan<T extends AbstractSpan<T>> implements Recyclable {
+public abstract class AbstractSpan<T extends AbstractSpan<T>> implements Recyclable, ElasticContext<T> {
     public static final int PRIO_USER_SUPPLIED = 1000;
     public static final int PRIO_HIGH_LEVEL_FRAMEWORK = 100;
     public static final int PRIO_METHOD_SIGNATURE = 100;
     public static final int PRIO_LOW_LEVEL_FRAMEWORK = 10;
     public static final int PRIO_DEFAULT = 0;
     private static final Logger logger = LoggerFactory.getLogger(AbstractSpan.class);
+    private static final Logger oneTimeDuplicatedEndLogger = LoggerUtils.logOnce(logger);
+    private static final Logger oneTimeMaxSpanLinksLogger = LoggerUtils.logOnce(logger);
+
     protected static final double MS_IN_MICROS = TimeUnit.MILLISECONDS.toMicros(1);
     protected final TraceContext traceContext;
 
@@ -50,10 +58,9 @@ public abstract class AbstractSpan<T extends AbstractSpan<T>> implements Recycla
     protected final StringBuilder name = new StringBuilder();
     protected final boolean collectBreakdownMetrics;
     protected final ElasticApmTracer tracer;
-    private long timestamp;
+    protected final AtomicLong timestamp = new AtomicLong();
+    protected final AtomicLong endTimestamp = new AtomicLong();
 
-    // in microseconds
-    protected long duration;
     private ChildDurationTimer childDurations = new ChildDurationTimer();
     protected AtomicInteger references = new AtomicInteger();
     protected volatile boolean finished = true;
@@ -105,6 +112,22 @@ public abstract class AbstractSpan<T extends AbstractSpan<T>> implements Recycla
 
     private boolean hasCapturedExceptions;
 
+    @Nullable
+    protected volatile String type;
+
+    protected volatile boolean sync = true;
+
+    protected final AtomicReference<Span> bufferedSpan = new AtomicReference<>();
+
+    // Span links handling
+    public static final int MAX_ALLOWED_SPAN_LINKS = 1000;
+    private final List<TraceContext> spanLinks = new UniqueSpanLinkArrayList();
+
+    @Nullable
+    private OTelSpanKind otelKind = null;
+
+    private final Map<String, Object> otelAttributes = new HashMap<>();
+
     public int getReferenceCount() {
         return references.get();
     }
@@ -132,9 +155,6 @@ public abstract class AbstractSpan<T extends AbstractSpan<T>> implements Recycla
     public boolean isDiscarded() {
         return discardRequested && getTraceContext().isDiscardable();
     }
-
-    @Nullable
-    public abstract Transaction getTransaction();
 
     private static class ChildDurationTimer implements Recyclable {
 
@@ -211,15 +231,15 @@ public abstract class AbstractSpan<T extends AbstractSpan<T>> implements Recycla
      * How long the transaction took to complete, in µs
      */
     public long getDuration() {
-        return duration;
+        return endTimestamp.get() - timestamp.get();
     }
 
     public long getSelfDuration() {
-        return duration - childDurations.getDuration();
+        return getDuration() - childDurations.getDuration();
     }
 
     public double getDurationMs() {
-        return duration / AbstractSpan.MS_IN_MICROS;
+        return getDuration() / AbstractSpan.MS_IN_MICROS;
     }
 
     /**
@@ -230,7 +250,7 @@ public abstract class AbstractSpan<T extends AbstractSpan<T>> implements Recycla
     }
 
     /**
-     * Resets and returns the name {@link StringBuilder} if the provided priority is {@code >=} {@link #namePriority} one.
+     * Resets and returns the name {@link StringBuilder} if the provided priority is {@code >=} {@link #namePriority}.
      * Otherwise, returns {@code null}
      *
      * @param namePriority the priority for the name. See also the {@code AbstractSpan#PRIO_*} constants.
@@ -286,7 +306,7 @@ public abstract class AbstractSpan<T extends AbstractSpan<T>> implements Recycla
      * @return name
      */
     public String getNameAsString() {
-        return name.toString();
+        return getNameForSerialization().toString();
     }
 
     /**
@@ -329,23 +349,122 @@ public abstract class AbstractSpan<T extends AbstractSpan<T>> implements Recycla
         return thiz();
     }
 
+    public T withType(@Nullable String type) {
+        this.type = normalizeEmpty(type);
+        return thiz();
+    }
+
+    public T withSync(boolean sync) {
+        this.sync = sync;
+        return thiz();
+    }
+
+    @Nullable
+    protected static String normalizeEmpty(@Nullable String value) {
+        return value == null || value.isEmpty() ? null : value;
+    }
+
     /**
      * Recorded time of the span or transaction in microseconds since epoch
      */
     public long getTimestamp() {
-        return timestamp;
+        return timestamp.get();
     }
 
     public TraceContext getTraceContext() {
         return traceContext;
     }
 
+    private boolean canAddSpanLink() {
+        if (spanLinks.size() == MAX_ALLOWED_SPAN_LINKS) {
+            oneTimeMaxSpanLinksLogger.warn("Span links for {} has reached the allowed maximum ({}). No more spans will be linked.",
+                this, MAX_ALLOWED_SPAN_LINKS);
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Adds a span link based on the tracecontext header retrieved from the provided {@code carrier} through the provided {@code
+     * headerGetter}.
+     *
+     * @param childContextCreator the proper tracecontext inference implementation, corresponding on the header and types
+     * @param headerGetter        the proper header extractor, corresponding the header and carrier types
+     * @param carrier             the object from which the tracecontext header is to be retrieved
+     * @param <H>                 the tracecontext header type - either binary ({@code byte[]}) or textual ({@code String})
+     * @param <C>                 the tracecontext header carrier type, e.g. Kafka record or JMS message
+     * @return {@code true} if added, {@code false} otherwise
+     */
+    public <H, C> boolean addSpanLink(
+        TraceContext.HeaderChildContextCreator<H, C> childContextCreator,
+        HeaderGetter<H, C> headerGetter,
+        @Nullable C carrier
+    ) {
+        if (!canAddSpanLink()) {
+            return false;
+        }
+        boolean added = false;
+        try {
+            TraceContext childTraceContext = tracer.createSpanLink();
+            if (childContextCreator.asChildOf(childTraceContext, carrier, headerGetter)) {
+                added = spanLinks.add(childTraceContext);
+            }
+            if (!added) {
+                tracer.recycle(childTraceContext);
+            }
+        } catch (Exception e) {
+            logger.error(String.format("Failed to add span link to %s from header carrier %s and %s", this, carrier,
+                headerGetter.getClass().getName()), e);
+        }
+        return added;
+    }
+
+    /**
+     * Adds a span link based on the tracecontext header retrieved from the provided parent.
+     *
+     * @param childContextCreator the proper tracecontext inference implementation, which retrieves the header
+     * @param parent              the object from which the tracecontext header is to be retrieved
+     * @param <T>                 the parent type - AbstractSpan, TraceContext or Tracer
+     * @return {@code true} if added, {@code false} otherwise
+     */
+    public <T> boolean addSpanLink(TraceContext.ChildContextCreator<T> childContextCreator, T parent) {
+        if (!canAddSpanLink()) {
+            return false;
+        }
+        boolean added = false;
+        try {
+            TraceContext childTraceContext = tracer.createSpanLink();
+            if (childContextCreator.asChildOf(childTraceContext, parent)) {
+                added = spanLinks.add(childTraceContext);
+            }
+            if (!added) {
+                tracer.recycle(childTraceContext);
+            }
+        } catch (Exception e) {
+            logger.error(String.format("Failed to add span link to %s from parent %s", this, parent, e));
+        }
+        return added;
+    }
+
+    /**
+     * Returns a list of links from this span to other spans in the format of child {@link TraceContext}s, of which parent is the linked
+     * span. For each entry in the returned list, the linked span's {@code traceId} can be retrieved through
+     * {@link TraceContext#getTraceId()} and the {@code spanId} can be retrieved through {@link TraceContext#getParentId()}.
+     *
+     * @return a list of child {@link TraceContext}s of linked spans
+     */
+    public List<TraceContext> getSpanLinks() {
+        return spanLinks;
+    }
+
     @Override
     public void resetState() {
         finished = true;
         name.setLength(0);
-        timestamp = 0;
-        duration = 0;
+        type = null;
+        sync = true;
+        timestamp.set(0L);
+        endTimestamp.set(0L);
         traceContext.resetState();
         childDurations.resetState();
         references.set(0);
@@ -356,6 +475,18 @@ public abstract class AbstractSpan<T extends AbstractSpan<T>> implements Recycla
         outcome = null;
         userOutcome = null;
         hasCapturedExceptions = false;
+        bufferedSpan.set(null);
+        recycleSpanLinks();
+        otelKind = null;
+        otelAttributes.clear();
+    }
+
+    private void recycleSpanLinks() {
+        //noinspection ForLoopReplaceableByForEach
+        for (int i = 0; i < spanLinks.size(); i++) {
+            tracer.recycle(spanLinks.get(i));
+        }
+        spanLinks.clear();
     }
 
     public Span createSpan() {
@@ -451,16 +582,30 @@ public abstract class AbstractSpan<T extends AbstractSpan<T>> implements Recycla
 
     public final void end(long epochMicros) {
         if (!finished) {
-            this.duration = (epochMicros - timestamp);
+            this.endTimestamp.set(epochMicros);
             if (name.length() == 0) {
                 name.append("unnamed");
             }
             childDurations.onSpanEnd(epochMicros);
+
+            type = normalizeType(type);
+
             beforeEnd(epochMicros);
             this.finished = true;
+            Span buffered = bufferedSpan.get();
+            if (buffered != null) {
+                if (bufferedSpan.compareAndSet(buffered, null)) {
+                    this.tracer.endSpan(buffered);
+                }
+            }
             afterEnd();
         } else {
-            logger.warn("End has already been called: {}", this);
+            if (oneTimeDuplicatedEndLogger.isWarnEnabled()) {
+                oneTimeDuplicatedEndLogger.warn("End has already been called: " + this, new Throwable());
+            } else {
+                logger.warn("End has already been called: {}", this);
+                logger.debug("Consecutive AbstractSpan#end() invocation stack trace: ", new Throwable());
+            }
             assert false;
         }
     }
@@ -494,28 +639,21 @@ public abstract class AbstractSpan<T extends AbstractSpan<T>> implements Recycla
         return false;
     }
 
+    @Override
     public T activate() {
         tracer.activate(this);
         return (T) this;
     }
 
+    @Override
     public T deactivate() {
         tracer.deactivate(this);
         return (T) this;
     }
 
+    @Override
     public Scope activateInScope() {
-        // already in scope
-        if (tracer.getActive() == this) {
-            return Scope.NoopScope.INSTANCE;
-        }
-        activate();
-        return new Scope() {
-            @Override
-            public void close() {
-                deactivate();
-            }
-        };
+        return tracer.activateInScope(this);
     }
 
     /**
@@ -524,14 +662,14 @@ public abstract class AbstractSpan<T extends AbstractSpan<T>> implements Recycla
      * @param epochMicros start timestamp in micro-seconds since epoch
      */
     public void setStartTimestamp(long epochMicros) {
-        timestamp = epochMicros;
+        timestamp.set(epochMicros);
     }
 
     /**
      * Set start timestamp from context current clock
      */
     public void setStartTimestampNow() {
-        timestamp = getTraceContext().getClock().getEpochMicros();
+        timestamp.set(getTraceContext().getClock().getEpochMicros());
     }
 
     void onChildStart(long epochMicros) {
@@ -664,6 +802,48 @@ public abstract class AbstractSpan<T extends AbstractSpan<T>> implements Recycla
     public T withUserOutcome(Outcome outcome) {
         this.userOutcome = outcome;
         return thiz();
+    }
+
+    @Override
+    public ElasticContext<T> withActiveSpan(AbstractSpan<?> span) {
+        // for internal spans the active span is only stored implicitly in the stack, hence we have no requirement
+        // to have any other kind of context storage.
+        return this;
+    }
+
+    @Override
+    public AbstractSpan<?> getSpan() {
+        return this;
+    }
+
+    public T withOtelKind(OTelSpanKind kind) {
+        this.otelKind = kind;
+        return thiz();
+    }
+
+    @Nullable
+    public OTelSpanKind getOtelKind() {
+        return otelKind;
+    }
+
+    public Map<String, Object> getOtelAttributes() {
+        return otelAttributes;
+    }
+
+    @Nullable
+    public String getType() {
+        return type;
+    }
+
+    public boolean isSync() {
+        return sync;
+    }
+
+    private String normalizeType(@Nullable String type) {
+        if (type == null || type.isEmpty()) {
+            return "custom";
+        }
+        return type;
     }
 
 }

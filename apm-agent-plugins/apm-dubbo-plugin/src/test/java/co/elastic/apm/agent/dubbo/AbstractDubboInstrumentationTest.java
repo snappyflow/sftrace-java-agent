@@ -41,7 +41,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
 
-import static org.assertj.core.api.Assertions.assertThat;
+import static co.elastic.apm.agent.testutils.assertions.Assertions.assertThat;
 import static org.mockito.Mockito.when;
 
 public abstract class AbstractDubboInstrumentationTest extends AbstractInstrumentationTest {
@@ -197,11 +197,13 @@ public abstract class AbstractDubboInstrumentationTest extends AbstractInstrumen
         assertThat(span.getType()).isEqualTo("external");
         assertThat(span.getSubtype()).isEqualTo("dubbo");
         Destination destination = span.getContext().getDestination();
-        assertThat(destination.getAddress().toString()).isEqualTo("localhost");
+        assertThat(destination.getAddress().toString()).isIn("localhost", "127.0.0.1");
         assertThat(destination.getPort()).isEqualTo(port);
 
-        Destination.Service service = destination.getService();
-        assertThat(service.getResource().toString()).matches("localhost:\\d+");
+        assertThat(span.getContext().getServiceTarget())
+            .hasType("dubbo")
+            .hasName(String.format("localhost:%d", port))
+            .hasNameOnlyDestinationResource();
 
         assertThat(span.getOutcome())
             .describedAs("span outcome should be known")

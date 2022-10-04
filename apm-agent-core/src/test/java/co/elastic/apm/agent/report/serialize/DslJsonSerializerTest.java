@@ -24,20 +24,23 @@ import co.elastic.apm.agent.collections.LongList;
 import co.elastic.apm.agent.configuration.CoreConfiguration;
 import co.elastic.apm.agent.configuration.ServerlessConfiguration;
 import co.elastic.apm.agent.configuration.SpyConfiguration;
+import co.elastic.apm.agent.impl.BinaryHeaderMapAccessor;
 import co.elastic.apm.agent.impl.ElasticApmTracer;
-import co.elastic.apm.agent.impl.metadata.FaaSMetaDataExtension;
-import co.elastic.apm.agent.impl.metadata.MetaData;
-import co.elastic.apm.agent.impl.metadata.MetaDataMock;
+import co.elastic.apm.agent.impl.TextHeaderMapAccessor;
 import co.elastic.apm.agent.impl.Tracer;
 import co.elastic.apm.agent.impl.context.AbstractContext;
+import co.elastic.apm.agent.impl.context.Destination;
 import co.elastic.apm.agent.impl.context.Headers;
 import co.elastic.apm.agent.impl.context.Request;
 import co.elastic.apm.agent.impl.context.Url;
 import co.elastic.apm.agent.impl.error.ErrorCapture;
 import co.elastic.apm.agent.impl.metadata.Agent;
 import co.elastic.apm.agent.impl.metadata.CloudProviderInfo;
+import co.elastic.apm.agent.impl.metadata.FaaSMetaDataExtension;
 import co.elastic.apm.agent.impl.metadata.Framework;
 import co.elastic.apm.agent.impl.metadata.Language;
+import co.elastic.apm.agent.impl.metadata.MetaData;
+import co.elastic.apm.agent.impl.metadata.MetaDataMock;
 import co.elastic.apm.agent.impl.metadata.NameAndIdField;
 import co.elastic.apm.agent.impl.metadata.ProcessInfo;
 import co.elastic.apm.agent.impl.metadata.Service;
@@ -45,7 +48,9 @@ import co.elastic.apm.agent.impl.metadata.SystemInfo;
 import co.elastic.apm.agent.impl.sampling.ConstantSampler;
 import co.elastic.apm.agent.impl.sampling.Sampler;
 import co.elastic.apm.agent.impl.stacktrace.StacktraceConfiguration;
+import co.elastic.apm.agent.impl.transaction.AbstractSpan;
 import co.elastic.apm.agent.impl.transaction.Id;
+import co.elastic.apm.agent.impl.transaction.OTelSpanKind;
 import co.elastic.apm.agent.impl.transaction.Span;
 import co.elastic.apm.agent.impl.transaction.StackFrame;
 import co.elastic.apm.agent.impl.transaction.TraceContext;
@@ -62,6 +67,7 @@ import org.apache.commons.lang3.RandomStringUtils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.stagemonitor.configuration.ConfigurationRegistry;
 
@@ -76,6 +82,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.Future;
+import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.SoftAssertions.assertSoftly;
@@ -90,6 +97,7 @@ class DslJsonSerializerTest {
     private ObjectMapper objectMapper;
     private ApmServerClient apmServerClient;
     private Future<MetaData> metaData;
+    private ElasticApmTracer tracer;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -100,6 +108,7 @@ class DslJsonSerializerTest {
         serializer = new DslJsonSerializer(stacktraceConfiguration, apmServerClient, metaData);
         serializer.blockUntilReady();
         objectMapper = new ObjectMapper();
+        tracer = MockTracer.createRealTracer();
     }
 
     @Test
@@ -122,8 +131,8 @@ class DslJsonSerializerTest {
         when(apmServerClient.supportsNonStringLabels()).thenReturn(numericLabels);
 
         Map<String, Object> expectedMap;
-        if(numericLabels){
-             expectedMap= Map.of("foo", true);
+        if (numericLabels) {
+            expectedMap = Map.of("foo", true);
         } else {
             expectedMap = Collections.singletonMap("foo", null);
         }
@@ -155,9 +164,8 @@ class DslJsonSerializerTest {
 
     @Test
     void testErrorSerialization() {
-        ElasticApmTracer tracer = MockTracer.create();
         Transaction transaction = new Transaction(tracer);
-        transaction.start(TraceContext.asRoot(), null, -1, ConstantSampler.of(true), null);
+        transaction.startRoot(-1, ConstantSampler.of(true));
         ErrorCapture error = new ErrorCapture(tracer).asChildOf(transaction).withTimestamp(5000);
         error.setTransactionSampled(true);
         error.setTransactionType("test-type");
@@ -193,7 +201,7 @@ class DslJsonSerializerTest {
         when(stacktraceConfiguration.getStackTraceLimit()).thenReturn(-1);
         serializer = new DslJsonSerializer(stacktraceConfiguration, apmServerClient, metaData);
 
-        ErrorCapture error = new ErrorCapture(MockTracer.create()).withTimestamp(5000);
+        ErrorCapture error = new ErrorCapture(tracer).withTimestamp(5000);
         Exception exception = new Exception("test");
         error.setException(exception);
 
@@ -204,9 +212,8 @@ class DslJsonSerializerTest {
 
     @Test
     void testErrorSerializationWithEmptyTraceId() {
-        ElasticApmTracer tracer = MockTracer.create();
         Transaction transaction = new Transaction(tracer);
-        transaction.start(TraceContext.asRoot(), null, -1, ConstantSampler.of(true), null);
+        transaction.startRoot(-1, ConstantSampler.of(true));
         transaction.getTraceContext().getTraceId().resetState();
         ErrorCapture error = new ErrorCapture(tracer).asChildOf(transaction).withTimestamp(5000);
 
@@ -323,7 +330,7 @@ class DslJsonSerializerTest {
 
     @Test
     void testNullTransactionHeaders() {
-        Transaction transaction = new Transaction(MockTracer.create());
+        Transaction transaction = new Transaction(tracer);
         transaction.getContext().getRequest().addHeader("foo", (String) null);
         transaction.getContext().getRequest().addHeader("baz", (Enumeration<String>) null);
         transaction.getContext().getRequest().getHeaders().add("bar", null);
@@ -337,7 +344,7 @@ class DslJsonSerializerTest {
 
     @Test
     void testMessageHeaders() {
-        Span span = new Span(MockTracer.create());
+        Span span = new Span(tracer);
         span.getTraceContext().asRootSpan(ConstantSampler.of(true));
         span.withType("messaging").withSubtype("kafka");
 
@@ -367,7 +374,7 @@ class DslJsonSerializerTest {
 
     @Test
     void testSpanTypeSerialization() {
-        Span span = new Span(MockTracer.create());
+        Span span = new Span(tracer);
         span.getTraceContext().asRootSpan(ConstantSampler.of(true));
         span.withType("template.jsf.render.view");
         JsonNode spanJson = readJsonString(serializer.toJsonString(span));
@@ -382,19 +389,19 @@ class DslJsonSerializerTest {
         spanJson = readJsonString(serializer.toJsonString(span));
         assertThat(spanJson.get("type").textValue()).isEqualTo("template.jsf_lifecycle.render_view");
 
-        span = new Span(MockTracer.create());
+        span = new Span(tracer);
         span.getTraceContext().asRootSpan(ConstantSampler.of(true));
         span.withType("template").withAction("jsf.render");
         spanJson = readJsonString(serializer.toJsonString(span));
         assertThat(spanJson.get("type").textValue()).isEqualTo("template..jsf_render");
 
-        span = new Span(MockTracer.create());
+        span = new Span(tracer);
         span.getTraceContext().asRootSpan(ConstantSampler.of(true));
         span.withType("template").withSubtype("jsf.render");
         spanJson = readJsonString(serializer.toJsonString(span));
         assertThat(spanJson.get("type").textValue()).isEqualTo("template.jsf_render");
 
-        span = new Span(MockTracer.create());
+        span = new Span(tracer);
         span.getTraceContext().asRootSpan(ConstantSampler.of(true));
         span.withSubtype("jsf").withAction("render");
         spanJson = readJsonString(serializer.toJsonString(span));
@@ -403,7 +410,7 @@ class DslJsonSerializerTest {
 
     @Test
     void testSpanHttpContextSerialization() {
-        Span span = new Span(MockTracer.create());
+        Span span = new Span(tracer);
         span.getContext().getHttp()
             .withMethod("GET")
             .withStatusCode(523)
@@ -418,30 +425,86 @@ class DslJsonSerializerTest {
         assertThat(http.get("status_code").intValue()).isEqualTo(523);
     }
 
-    @Test
-    void testSpanDestinationContextSerialization() {
+    public static boolean[][] getContentCombinations() {
+        return new boolean[][]{
+            {true, true, true, true},
+            {true, false, true, true},
+            {false, true, true, true},
+            {false, true, false, true},
+            {false, false, true, true},
+            {false, false, true, false},
+            {false, false, false, true},
+            {false, false, false, false}
+        };
+    }
+
+    @ParameterizedTest
+    @MethodSource(value = "getContentCombinations")
+    void testSpanDestinationContextSerializationWithCombinations(boolean[] contentCombination) {
+        boolean hasAddress = contentCombination[0];
+        boolean hasPort = contentCombination[1];
+        boolean hasServiceTargetContent = contentCombination[2];
+        boolean hasCloudContent = contentCombination[3];
         Span span = new Span(MockTracer.create());
-        span.getContext().getDestination().withAddress("whatever.com").withPort(80)
-            .getService()
-            .withResource("whatever.com:80");
+        Destination dest = span.getContext().getDestination();
+        if (hasAddress) {
+            dest.withAddress("whatever.com");
+        }
+        if (hasPort) {
+            dest.withPort(80);
+        }
+        if (hasServiceTargetContent) {
+            span.getContext().getServiceTarget()
+                .withType("http")
+                .withHostPortName("whatever.com", 80)
+                .withNameOnlyDestinationResource();
+        }
+        if (hasCloudContent) {
+            dest.getCloud().withRegion("us-east-1");
+        }
 
         JsonNode spanJson = readJsonString(serializer.toJsonString(span));
         JsonNode context = spanJson.get("context");
         JsonNode destination = context.get("destination");
-        assertThat(destination).isNotNull();
-        assertThat("whatever.com").isEqualTo(destination.get("address").textValue());
-        assertThat(80).isEqualTo(destination.get("port").intValue());
-        JsonNode service = destination.get("service");
-        assertThat(service).isNotNull();
-        assertThat("whatever.com:80").isEqualTo(service.get("resource").textValue());
-        assertThat(service.get("name").textValue()).isEqualTo("");
-        assertThat(service.get("type").textValue()).isEqualTo("");
+
+
+        if(hasAddress || hasPort || hasServiceTargetContent || hasCloudContent){
+            assertThat(destination).isNotNull();
+            if (hasAddress) {
+                assertThat("whatever.com").isEqualTo(destination.get("address").textValue());
+            } else {
+                assertThat(destination.get("address")).isNull();
+            }
+
+            if (hasServiceTargetContent) {
+                JsonNode service = destination.get("service");
+                assertThat(service).isNotNull();
+                assertThat("whatever.com:80").isEqualTo(service.get("resource").textValue());
+                assertThat(service.get("name").textValue()).isEqualTo("");
+                assertThat(service.get("type").textValue()).isEqualTo("");
+                JsonNode serviceTarget = context.get("service").get("target");
+                assertThat(serviceTarget.get("type").asText()).isEqualTo("http");
+                assertThat(serviceTarget.get("name").asText()).isEqualTo("whatever.com:80");
+            } else {
+                assertThat(destination.get("service")).isNull();
+            }
+
+            if (hasCloudContent) {
+                JsonNode cloud = destination.get("cloud");
+                assertThat(cloud).isNotNull();
+                assertThat(cloud.get("region").textValue()).isEqualTo("us-east-1");
+            } else {
+                assertThat(destination.get("cloud")).isNull();
+            }
+        } else {
+            assertThat(destination).isNull();
+        }
     }
 
     @Test
     void testTransactionNullFrameworkNameSerialization() {
-        Transaction transaction = new Transaction(MockTracer.create());
-        transaction.getTraceContext().setServiceName("service-name");
+        Transaction transaction = new Transaction(tracer);
+        transaction.getTraceContext().setServiceInfo("service-name", null);
         transaction.setUserFrameworkName(null);
         JsonNode transactionJson = readJsonString(serializer.toJsonString(transaction));
         assertThat(transactionJson.get("context").get("service").get("framework")).isNull();
@@ -449,8 +512,8 @@ class DslJsonSerializerTest {
 
     @Test
     void testTransactionEmptyFrameworkNameSerialization() {
-        Transaction transaction = new Transaction(MockTracer.create());
-        transaction.getTraceContext().setServiceName("service-name");
+        Transaction transaction = new Transaction(tracer);
+        transaction.getTraceContext().setServiceInfo("service-name", null);
         transaction.setUserFrameworkName("");
         JsonNode transactionJson = readJsonString(serializer.toJsonString(transaction));
         assertThat(transactionJson.get("context").get("service").get("framework")).isNull();
@@ -458,21 +521,21 @@ class DslJsonSerializerTest {
 
     @Test
     void testSpanInvalidDestinationSerialization() {
-        Span span = new Span(MockTracer.create());
-        span.getContext().getDestination().withAddress(null).withPort(-1)
-            .getService()
-            .withResource("");
+        Span span = new Span(tracer);
+        span.getContext().getDestination().withAddress(null).withPort(-1);
+
+        span.getContext().getServiceTarget().withUserName("").withNameOnlyDestinationResource();
 
         JsonNode spanJson = readJsonString(serializer.toJsonString(span));
-        assertThat(spanJson.get("context").get("destination")).isNull();
+        JsonNode contextJson = spanJson.get("context");
+        assertThat(contextJson.get("destination")).isNull();
+        assertThat(contextJson.get("service")).isNull();
     }
 
     @Test
     void testSpanValidPortSerialization() {
-        Span span = new Span(MockTracer.create());
-        span.getContext().getDestination().withAddress(null).withPort(8090)
-            .getService()
-            .withResource("");
+        Span span = new Span(tracer);
+        span.getContext().getDestination().withAddress(null).withPort(8090);
 
         JsonNode spanJson = readJsonString(serializer.toJsonString(span));
         JsonNode destination = spanJson.get("context").get("destination");
@@ -484,10 +547,8 @@ class DslJsonSerializerTest {
 
     @Test
     void testSpanValidAddressAndPortSerialization() {
-        Span span = new Span(MockTracer.create());
-        span.getContext().getDestination().withAddress("test").withPort(8090)
-            .getService()
-            .withResource("");
+        Span span = new Span(tracer);
+        span.getContext().getDestination().withAddress("test").withPort(8090);
 
         JsonNode spanJson = readJsonString(serializer.toJsonString(span));
         JsonNode destination = spanJson.get("context").get("destination");
@@ -499,10 +560,8 @@ class DslJsonSerializerTest {
 
     @Test
     void testSpanValidAddressSerialization() {
-        Span span = new Span(MockTracer.create());
-        span.getContext().getDestination().withAddress("test").withPort(0)
-            .getService()
-            .withResource("");
+        Span span = new Span(tracer);
+        span.getContext().getDestination().withAddress("test").withPort(0);
 
         JsonNode spanJson = readJsonString(serializer.toJsonString(span));
         JsonNode destination = spanJson.get("context").get("destination");
@@ -514,40 +573,46 @@ class DslJsonSerializerTest {
 
     @Test
     void testSpanValidServiceResourceSerialization() {
-        Span span = new Span(MockTracer.create());
-        span.getContext().getDestination().withAddress("").withPort(0)
-            .getService()
-            .withResource("test-resource");
+        Span span = new Span(tracer);
+        span.getContext().getDestination().withAddress("").withPort(0);
+        span.getContext().getServiceTarget().withType("test").withName("resource");
 
         JsonNode spanJson = readJsonString(serializer.toJsonString(span));
         JsonNode destination = spanJson.get("context").get("destination");
         assertThat(destination).isNotNull();
-        assertThat(destination.get("port")).isNull();
-        assertThat(destination.get("address")).isNull();
         JsonNode service = destination.get("service");
-        assertThat(service.get("resource").textValue()).isEqualTo("test-resource");
+        assertThat(service.get("resource").textValue()).isEqualTo("test/resource");
         assertThat(service.get("name").textValue()).isEmpty();
         assertThat(service.get("type").textValue()).isEmpty();
+
+        JsonNode serviceTarget = spanJson.get("context").get("service").get("target");
+        assertThat(serviceTarget.get("type").textValue()).isEqualTo("test");
+        assertThat(serviceTarget.get("name").textValue()).isEqualTo("resource");
     }
 
     @Test
     void testSpanValidServiceAndAddressResourceSerialization() {
-        Span span = new Span(MockTracer.create());
-        span.getContext().getDestination().withAddress("test-address").withPort(0)
-            .getService()
-            .withResource("test-resource");
+        Span span = new Span(tracer);
+        span.getContext().getDestination().withAddress("test-address").withPort(0);
+
+        span.getContext().getServiceTarget().withType("test").withName("test-resource").withNameOnlyDestinationResource();
 
         JsonNode spanJson = readJsonString(serializer.toJsonString(span));
         JsonNode destination = spanJson.get("context").get("destination");
         assertThat(destination).isNotNull();
         assertThat(destination.get("port")).isNull();
         assertThat(destination.get("address").textValue()).isEqualTo("test-address");
+
         assertThat(destination.get("service").get("resource").textValue()).isEqualTo("test-resource");
+        JsonNode serviceTarget = spanJson.get("context").get("service").get("target");
+        assertThat(serviceTarget.get("type").textValue()).isEqualTo("test");
+        assertThat(serviceTarget.get("name").textValue()).isEqualTo("test-resource");
+
     }
 
     @Test
     void testSpanMessageContextSerialization() {
-        Span span = new Span(MockTracer.create());
+        Span span = new Span(tracer);
         span.getContext().getMessage()
             .withRoutingKey("routing-key")
             .withQueue("test-queue")
@@ -580,7 +645,7 @@ class DslJsonSerializerTest {
 
     @Test
     void testSpanMessageContextSerializationWithoutRoutingKey() {
-        Span span = new Span(MockTracer.create());
+        Span span = new Span(tracer);
         span.getContext().getMessage()
             .withQueue("test-queue")
             .withBody("test-body")
@@ -595,7 +660,7 @@ class DslJsonSerializerTest {
 
     @Test
     void testSpanMessageContextInvalidTimestamp() {
-        Span span = new Span(MockTracer.create());
+        Span span = new Span(tracer);
         span.getContext().getMessage()
             .withQueue("test-queue");
 
@@ -612,7 +677,7 @@ class DslJsonSerializerTest {
 
     @Test
     void testSpanDbContextSerialization() {
-        Span span = new Span(MockTracer.create());
+        Span span = new Span(tracer);
         span.getContext().getDb()
             .withAffectedRowsCount(5)
             .withInstance("test-instance")
@@ -633,7 +698,7 @@ class DslJsonSerializerTest {
         id1.setToRandomValue();
         Id id2 = Id.new64BitId();
         id2.setToRandomValue();
-        Span span = new Span(MockTracer.create());
+        Span span = new Span(tracer);
         span.withChildIds(LongList.of(id1.getLeastSignificantBits(), id2.getLeastSignificantBits()));
 
         JsonNode spanJson = readJsonString(serializer.toJsonString(span));
@@ -686,7 +751,6 @@ class DslJsonSerializerTest {
         JsonNode serviceJson = metaDataJson.get("service");
         assertThat(service).isNotNull();
         assertThat(serviceJson.get("name").textValue()).isEqualTo("MyService");
-        assertThat(serviceJson.get("id").textValue()).isEqualTo("service-id");
         assertThat(serviceJson.get("version").textValue()).isEqualTo("1.0");
 
         JsonNode languageJson = serviceJson.get("language");
@@ -770,7 +834,6 @@ class DslJsonSerializerTest {
     @Test
     void testTransactionContextSerialization() {
 
-        ElasticApmTracer tracer = MockTracer.create();
         Transaction transaction = new Transaction(tracer);
 
         // test only the most recent server here
@@ -827,8 +890,7 @@ class DslJsonSerializerTest {
         String frameworkName = RandomStringUtils.randomAlphanumeric(10);
         String frameworkVersion = RandomStringUtils.randomNumeric(3);
 
-        ctx.setServiceName(serviceName);
-        ctx.setServiceVersion(serviceVersion);
+        ctx.setServiceInfo(serviceName, serviceVersion);
 
         transaction.setFrameworkName(frameworkName);
         transaction.setFrameworkVersion(frameworkVersion);
@@ -982,7 +1044,7 @@ class DslJsonSerializerTest {
 
     @Test
     void testJsonSchemaDslJsonEmptyValues() throws IOException {
-        Transaction transaction = new Transaction(MockTracer.create());
+        Transaction transaction = new Transaction(tracer);
         final String content = serializer.toJsonString(transaction);
         System.out.println(content);
         JsonNode transactionNode = objectMapper.readTree(content);
@@ -1208,15 +1270,14 @@ class DslJsonSerializerTest {
     private FaaSMetaDataExtension createFaaSMetaDataExtension() {
         return new FaaSMetaDataExtension(
             new Framework("Lambda_Java", "1.2.3"),
-            "service-id",
             new NameAndIdField(null, "accountId"),
             "region"
         );
     }
 
     private Transaction createRootTransaction(Sampler sampler) {
-        Transaction t = new Transaction(MockTracer.create());
-        t.start(TraceContext.asRoot(), null, 0, sampler, getClass().getClassLoader());
+        Transaction t = new Transaction(tracer);
+        t.startRoot(0, sampler);
         t.withType("type");
         t.getContext().getRequest().withMethod("GET");
         t.getContext().getRequest().getUrl().withFull("http://localhost:8080/foo/bar");
@@ -1229,7 +1290,7 @@ class DslJsonSerializerTest {
 
     @Test
     void testSpanStackFrameSerialization() {
-        Span span = new Span(MockTracer.create());
+        Span span = new Span(tracer);
         span.setStackTrace(Arrays.asList(StackFrame.of("foo.Bar", "baz"), StackFrame.of("foo.Bar$Baz", "qux")));
 
         JsonNode spanJson = readJsonString(serializer.toJsonString(span));
@@ -1291,7 +1352,7 @@ class DslJsonSerializerTest {
         assertThat(transactionContext.isSampled()).isTrue();
         assertThat(transactionContext.getSampleRate()).isEqualTo(0.42d);
 
-        Span span = new Span(MockTracer.create());
+        Span span = new Span(tracer);
         span.getTraceContext().asChildOf(transactionContext);
 
         JsonNode jsonSpan = readJsonString(serializer.toJsonString(span));
@@ -1300,7 +1361,7 @@ class DslJsonSerializerTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true,false})
+    @ValueSource(booleans = {true, false})
     void multiValueHeaders(boolean supportsMulti) {
         // older versions of APM server do not support multi-value headers
         // thus we should make sure to not break those
@@ -1319,7 +1380,7 @@ class DslJsonSerializerTest {
             .addHeader("content-type", "content-type1")
             .addHeader("content-type", "content-type2");
 
-        if(supportsMulti){
+        if (supportsMulti) {
             when(apmServerClient.supportsMultipleHeaderValues())
                 .thenReturn(supportsMulti);
         }
@@ -1345,13 +1406,104 @@ class DslJsonSerializerTest {
         assertThat(headersJson).isNotNull();
     }
 
-    private static void checkSingleValueHeader(JsonNode json, String fieldName, String value){
+    @Test
+    void testOTelSpanSerialization() {
+        Span span = new Span(tracer).withName("otel span");
+        testOTelSpanSerialization(span, s -> readJsonString(serializer.toJsonString(s)));
+
+        Transaction transaction = new Transaction(MockTracer.create()).withName("otel span");
+        testOTelSpanSerialization(transaction, t -> readJsonString(serializer.toJsonString(t)));
+    }
+
+    private <T extends AbstractSpan<T>> void testOTelSpanSerialization(T context, Function<T, JsonNode> toJson) {
+
+        assertThat(context.getOtelKind())
+            .describedAs("otel span kind should not be set by default")
+            .isNull();
+
+        JsonNode spanJson = toJson.apply(context );
+
+        assertThat(spanJson.get("name").asText()).isEqualTo("otel span");
+        assertThat(spanJson.get("otel")).isNull();
+
+        for (OTelSpanKind kind : OTelSpanKind.values()) {
+            context.withOtelKind(kind);
+            spanJson = toJson.apply(context);
+
+            JsonNode otelJson = spanJson.get("otel");
+            assertThat(otelJson).isNotNull();
+            assertThat(otelJson.get("span_kind").asText()).isEqualTo(kind.name());
+        }
+
+        // with custom otel attributes
+        context.getOtelAttributes().put("attribute.string", "hello");
+        context.getOtelAttributes().put("attribute.long", 123L);
+        context.getOtelAttributes().put("attribute.boolean", false);
+        context.getOtelAttributes().put("attribute.float", 0.42f);
+        spanJson = toJson.apply(context);
+        JsonNode otelJson = spanJson.get("otel");
+        assertThat(otelJson).isNotNull();
+        JsonNode otelAttributes = otelJson.get("attributes");
+        assertThat(otelAttributes).isNotNull();
+        assertThat(otelAttributes.size()).isEqualTo(4);
+        assertThat(otelAttributes.get("attribute.string").asText()).isEqualTo("hello");
+        assertThat(otelAttributes.get("attribute.long").asLong()).isEqualTo(123L);
+        assertThat(otelAttributes.get("attribute.boolean").asBoolean()).isFalse();
+        assertThat(otelAttributes.get("attribute.float").asDouble()).isEqualTo(0.42d);
+    }
+
+    @Test
+    void testNonCompositeSpan() {
+        Span span = new Span(tracer);
+
+        JsonNode jsonSpan = readJsonString(serializer.toJsonString(span));
+        assertThat(jsonSpan.get("composite")).isNull();
+    }
+
+    @Test
+    void testCompositeSpan() {
+        Span span = new Span(tracer);
+        span.getComposite().init(1234, "exact_match");
+
+        JsonNode jsonSpan = readJsonString(serializer.toJsonString(span));
+        assertThat(jsonSpan.get("composite").get("count").asInt()).isEqualTo(1);
+        assertThat(jsonSpan.get("composite").get("sum").asDouble()).isEqualTo(1.234);
+        assertThat(jsonSpan.get("composite").get("compression_strategy").asText()).isEqualTo("exact_match");
+    }
+
+    @Test
+    void testSpanLinksSerialization() {
+        Transaction transaction = tracer.startRootTransaction(null);
+        Span parent1 = Objects.requireNonNull(transaction).createSpan();
+        Map<String, String> textTraceContextCarrier = new HashMap<>();
+        parent1.propagateTraceContext(textTraceContextCarrier, TextHeaderMapAccessor.INSTANCE);
+        transaction.addSpanLink(TraceContext.getFromTraceContextTextHeaders(), TextHeaderMapAccessor.INSTANCE, textTraceContextCarrier);
+        Span parent2 = transaction.createSpan();
+        Map<String, byte[]> binaryTraceContextCarrier = new HashMap<>();
+        parent2.propagateTraceContext(binaryTraceContextCarrier, BinaryHeaderMapAccessor.INSTANCE);
+        transaction.addSpanLink(TraceContext.getFromTraceContextBinaryHeaders(), BinaryHeaderMapAccessor.INSTANCE, binaryTraceContextCarrier);
+        JsonNode transactionJson = readJsonString(serializer.toJsonString(transaction));
+        JsonNode spanLinks = transactionJson.get("links");
+        assertThat(spanLinks).isNotNull();
+        assertThat(spanLinks.isArray()).isTrue();
+        assertThat(spanLinks.size()).isEqualTo(2);
+        JsonNode parent1link = spanLinks.get(0);
+        assertThat(parent1link.isObject()).isTrue();
+        assertThat(parent1link.get("trace_id").textValue()).isEqualTo(parent1.getTraceContext().getTraceId().toString());
+        assertThat(parent1link.get("span_id").textValue()).isEqualTo(parent1.getTraceContext().getId().toString());
+        JsonNode parent2link = spanLinks.get(1);
+        assertThat(parent2link.isObject()).isTrue();
+        assertThat(parent2link.get("trace_id").textValue()).isEqualTo(parent2.getTraceContext().getTraceId().toString());
+        assertThat(parent2link.get("span_id").textValue()).isEqualTo(parent2.getTraceContext().getId().toString());
+    }
+
+    private static void checkSingleValueHeader(JsonNode json, String fieldName, String value) {
         JsonNode fieldValue = json.get(fieldName);
         assertThat(fieldValue.isTextual()).isTrue();
         assertThat(fieldValue.asText()).isEqualTo(value);
     }
 
-    private static void checkMultiValueHeader(JsonNode json, String fieldName, String value1, String value2){
+    private static void checkMultiValueHeader(JsonNode json, String fieldName, String value1, String value2) {
         JsonNode fieldValue = json.get(fieldName);
         assertThat(fieldValue.isArray()).isTrue();
         assertThat(fieldValue.size()).isEqualTo(2);
@@ -1402,7 +1554,8 @@ class DslJsonSerializerTest {
     }
 
     private String serializeTags(Map<String, Object> tags) {
-        final AbstractContext context = new AbstractContext() {};
+        final AbstractContext context = new AbstractContext() {
+        };
         for (Map.Entry<String, Object> entry : tags.entrySet()) {
             if (entry.getValue() instanceof String) {
                 context.addLabel(entry.getKey(), (String) entry.getValue());

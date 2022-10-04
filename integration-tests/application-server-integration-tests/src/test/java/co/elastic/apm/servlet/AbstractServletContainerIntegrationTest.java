@@ -21,6 +21,7 @@ package co.elastic.apm.servlet;
 import co.elastic.apm.agent.MockReporter;
 import co.elastic.apm.agent.sdk.logging.Logger;
 import co.elastic.apm.agent.sdk.logging.LoggerFactory;
+import co.elastic.apm.agent.test.AgentFileAccessor;
 import co.elastic.apm.agent.testutils.TestContainersUtils;
 import co.elastic.apm.servlet.tests.TestApp;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -40,7 +41,6 @@ import org.mockserver.model.HttpResponse;
 import org.testcontainers.containers.Container;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.Network;
-import org.testcontainers.containers.SocatContainer;
 import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.utility.MountableFile;
 
@@ -48,6 +48,7 @@ import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -86,9 +87,9 @@ import static org.mockserver.model.HttpRequest.request;
 public abstract class AbstractServletContainerIntegrationTest {
     private static final Logger logger = LoggerFactory.getLogger(AbstractServletContainerIntegrationTest.class);
 
-    private static final String pathToJavaagent;
-    private static final String pathToAttach;
-    private static final String pathToSlimAttach;
+    private static final Path pathToJavaagent;
+    private static final Path pathToAttach;
+    private static final Path pathToSlimAttach;
 
     static boolean ENABLE_DEBUGGING = false;
     static boolean ENABLE_RUNTIME_ATTACH = true;
@@ -117,12 +118,9 @@ public abstract class AbstractServletContainerIntegrationTest {
             .addInterceptor(loggingInterceptor)
             .readTimeout(ENABLE_DEBUGGING ? 0 : 10, TimeUnit.SECONDS)
             .build();
-        pathToJavaagent = AgentFileAccessor.getPathToJavaagent();
-        pathToAttach = AgentFileAccessor.getPathToAttacher();
-        pathToSlimAttach = AgentFileAccessor.getPathToSlimAttacher();
-        checkFilePresent(pathToJavaagent);
-        checkFilePresent(pathToAttach);
-        checkFilePresent(pathToSlimAttach);
+        pathToJavaagent = checkFilePresent(AgentFileAccessor.getPathToJavaagent());
+        pathToAttach = checkFilePresent(AgentFileAccessor.getPathToAttacher());
+        pathToSlimAttach = checkFilePresent(AgentFileAccessor.getPathToSlimAttacher());
     }
 
     private final MockReporter mockReporter = new MockReporter();
@@ -130,8 +128,6 @@ public abstract class AbstractServletContainerIntegrationTest {
     private final int webPort;
     private final String expectedDefaultServiceName;
     private final String containerName;
-    @Nullable
-    private GenericContainer<?> debugProxy;
     private TestApp currentTestApp;
 
     protected AbstractServletContainerIntegrationTest(GenericContainer<?> servletContainer, String expectedDefaultServiceName, String deploymentPath, String containerName) {
@@ -144,7 +140,6 @@ public abstract class AbstractServletContainerIntegrationTest {
         this.webPort = webPort;
         if (ENABLE_DEBUGGING) {
             enableDebugging(servletContainer);
-            this.debugProxy = createDebugProxy(servletContainer, debugPort);
         }
         if (runtimeAttachSupported() && !ENABLE_RUNTIME_ATTACH) {
             // If runtime attach is off for Servlet containers that support that, we need to add the javaagent here
@@ -180,29 +175,32 @@ public abstract class AbstractServletContainerIntegrationTest {
             .withEnv("ELASTIC_APM_DISABLED_INSTRUMENTATIONS", "") // enable all instrumentations for integration tests
             .withEnv("ELASTIC_APM_PROFILING_SPANS_ENABLED", "true")
             .withEnv("ELASTIC_APM_APPLICATION_PACKAGES", "co.elastic") // allows to use API annotations, we have to use a broad package due to multiple apps
+            .withEnv("ELASTIC_APM_SPAN_COMPRESSION_ENABLED", "false")
             .withLogConsumer(new StandardOutLogConsumer().withPrefix(containerName))
-            .withExposedPorts(webPort)
-            .withFileSystemBind(pathToJavaagent, "/elastic-apm-agent.jar")
-            .withFileSystemBind(pathToAttach, "/apm-agent-attach-cli.jar")
-            .withFileSystemBind(pathToSlimAttach, "/apm-agent-attach-cli-slim.jar")
+            .withCopyFileToContainer(MountableFile.forHostPath(pathToJavaagent), "/elastic-apm-agent.jar")
+            .withCopyFileToContainer(MountableFile.forHostPath(pathToAttach), "/apm-agent-attach-cli.jar")
+            .withCopyFileToContainer(MountableFile.forHostPath(pathToSlimAttach), "/apm-agent-attach-cli-slim.jar")
             .withStartupTimeout(Duration.ofMinutes(5));
+        if (ENABLE_DEBUGGING) {
+            servletContainer.withExposedPorts(webPort, debugPort);
+        } else {
+            servletContainer.withExposedPorts(webPort);
+        }
         for (TestApp testApp : getTestApps()) {
             testApp.getAdditionalEnvVariables().forEach(servletContainer::withEnv);
             try {
                 testApp.getAdditionalFilesToBind().forEach((pathToFile, containerPath) -> {
-                    checkFilePresent(pathToFile);
-                    servletContainer.withFileSystemBind(pathToFile, containerPath);
+                    checkFilePresent(Path.of(pathToFile));
+                    servletContainer.withCopyFileToContainer(MountableFile.forHostPath(pathToFile), containerPath);
                 });
             } catch (Exception e) {
                 e.printStackTrace();
             }
         }
-        if (isDeployViaFileSystemBind()) {
-            for (TestApp testApp : getTestApps()) {
-                String pathToAppFile = testApp.getAppFilePath();
-                checkFilePresent(pathToAppFile);
-                servletContainer.withFileSystemBind(pathToAppFile, deploymentPath + "/" + testApp.getAppFileName());
-            }
+        for (TestApp testApp : getTestApps()) {
+            String pathToAppFile = testApp.getAppFilePath();
+            checkFilePresent(Path.of(pathToAppFile));
+            servletContainer.withCopyFileToContainer(MountableFile.forHostPath(pathToAppFile), deploymentPath + "/" + testApp.getAppFileName());
         }
         this.servletContainer.withCreateContainerCmdModifier(TestContainersUtils.withMemoryLimit(4096));
         this.servletContainer.start();
@@ -219,13 +217,6 @@ public abstract class AbstractServletContainerIntegrationTest {
                 System.out.println(result.getStderr());
             } catch (Exception e) {
                 throw new RuntimeException(e);
-            }
-        }
-        if (!isDeployViaFileSystemBind()) {
-            for (TestApp testApp : getTestApps()) {
-                String pathToAppFile = testApp.getAppFilePath();
-                checkFilePresent(pathToAppFile);
-                servletContainer.copyFileToContainer(MountableFile.forHostPath(pathToAppFile), deploymentPath + "/" + testApp.getAppFileName());
             }
         }
     }
@@ -249,13 +240,6 @@ public abstract class AbstractServletContainerIntegrationTest {
     }
 
     /**
-     * If set to true, the war files are {@code --mount}ed into the container instead of copied, which is faster.
-     */
-    protected boolean isDeployViaFileSystemBind() {
-        return true;
-    }
-
-    /**
      * Change to false in the Servlet-container implementation in order to attach through {@code premain()}
      * See also {@link AbstractServletContainerIntegrationTest#getJavaagentEnvVariable()}
      *
@@ -276,33 +260,13 @@ public abstract class AbstractServletContainerIntegrationTest {
             "argument properly to the command line");
     }
 
-    private static void checkFilePresent(String pathToFile) {
-        final File file = new File(pathToFile);
-        logger.info("Check file {}", file.getAbsolutePath());
-        assertThat(file).exists();
-        assertThat(file).isFile();
-        assertThat(file.length()).isGreaterThan(0);
+    private static Path checkFilePresent(Path file) {
+        logger.info("Check file {}", file.toAbsolutePath());
+        assertThat(file).exists().isNotEmptyFile();
+        return file;
     }
 
     protected void enableDebugging(GenericContainer<?> servletContainer) {
-    }
-
-    // makes sure the debugging port is always 5005
-    // if the port is not available, the test can still run
-    @Nullable
-    private GenericContainer<?> createDebugProxy(GenericContainer<?> servletContainer, final int debugPort) {
-        try {
-            final SocatContainer socatContainer = new SocatContainer() {{
-                addFixedExposedPort(debugPort, debugPort);
-            }}
-                .withNetwork(Network.SHARED)
-                .withTarget(debugPort, servletContainer.getNetworkAliases().get(0));
-            socatContainer.start();
-            return socatContainer;
-        } catch (Exception e) {
-            logger.warn("Starting debug proxy failed");
-            return null;
-        }
     }
 
     @After
@@ -311,9 +275,6 @@ public abstract class AbstractServletContainerIntegrationTest {
             .stopContainerCmd(servletContainer.getContainerId())
             .exec();
         servletContainer.stop();
-        if (debugProxy != null) {
-            debugProxy.stop();
-        }
     }
 
     protected Iterable<TestApp> getTestApps() {
@@ -604,10 +565,13 @@ public abstract class AbstractServletContainerIntegrationTest {
         }
         JsonNode contextService = event.get("context").get("service");
         assertThat(contextService)
-            .withFailMessage("No service context available.")
+            .describedAs("No service context available.")
             .isNotNull();
         if (expectedServiceName != null) {
-            assertThat(contextService.get("name").textValue())
+            assertThat(contextService.get("name"))
+                .describedAs("Event has missing service name %s", event)
+                .isNotNull();
+            assertThat(contextService.get("name").asText())
                 .describedAs("Event has unexpected service name %s", event)
                 .isEqualTo(expectedServiceName);
         }

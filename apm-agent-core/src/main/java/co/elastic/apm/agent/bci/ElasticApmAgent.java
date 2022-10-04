@@ -88,6 +88,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 import static co.elastic.apm.agent.bci.bytebuddy.ClassLoaderNameMatcher.classLoaderWithName;
+import static co.elastic.apm.agent.bci.bytebuddy.ClassLoaderNameMatcher.classLoaderWithNamePrefix;
 import static co.elastic.apm.agent.bci.bytebuddy.ClassLoaderNameMatcher.isReflectionClassLoader;
 import static co.elastic.apm.agent.bci.bytebuddy.CustomElementMatchers.anyMatch;
 import static net.bytebuddy.asm.Advice.ExceptionHandler.Default.PRINTING;
@@ -209,7 +210,6 @@ public class ElasticApmAgent {
     }
 
 
-
     public static synchronized void initInstrumentation(final ElasticApmTracer tracer, Instrumentation instrumentation,
                                                         Iterable<ElasticApmInstrumentation> instrumentations) {
         GlobalTracer.init(tracer);
@@ -258,10 +258,8 @@ public class ElasticApmAgent {
             @Override
             public void run() {
                 tracer.stop();
-                instrumentationStats.reset();
             }
         });
-        instrumentationStats.reset();
         Logger logger = getLogger();
         if (ElasticApmAgent.instrumentation != null) {
             logger.warn("Instrumentation has already been initialized");
@@ -364,49 +362,57 @@ public class ElasticApmAgent {
         final ElementMatcher<? super NamedElement> typeMatcherPreFilter = instrumentation.getTypeMatcherPreFilter();
         final ElementMatcher.Junction<ProtectionDomain> versionPostFilter = instrumentation.getProtectionDomainPostFilter();
         final ElementMatcher<? super MethodDescription> methodMatcher = new ElementMatcher.Junction.Conjunction<>(instrumentation.getMethodMatcher(), not(isAbstract()));
-        return agentBuilder
-            .type(new AgentBuilder.RawMatcher() {
-                @Override
-                public boolean matches(TypeDescription typeDescription, ClassLoader classLoader, JavaModule module, Class<?> classBeingRedefined, ProtectionDomain protectionDomain) {
-                    long start = System.nanoTime();
+        final AgentBuilder.RawMatcher matcher = new AgentBuilder.RawMatcher() {
+            @Override
+            public boolean matches(TypeDescription typeDescription, ClassLoader classLoader, JavaModule module, Class<?> classBeingRedefined, ProtectionDomain protectionDomain) {
+                if (classLoadingMatchingPreFilter && !classLoaderMatcher.matches(classLoader)) {
+                    return false;
+                }
+                if (typeMatchingWithNamePreFilter && !typeMatcherPreFilter.matches(typeDescription)) {
+                    return false;
+                }
+                boolean typeMatches;
+                try {
+                    typeMatches = typeMatcher.matches(typeDescription) && versionPostFilter.matches(protectionDomain);
+                } catch (Exception ignored) {
+                    // could be because of a missing type
+                    typeMatches = false;
+                }
+                if (typeMatches) {
+                    logger.debug("Type match for instrumentation {}: {} matches {}",
+                        instrumentation.getClass().getSimpleName(), typeMatcher, typeDescription);
                     try {
-                        if (classLoadingMatchingPreFilter && !classLoaderMatcher.matches(classLoader)) {
-                            return false;
-                        }
-                        if (typeMatchingWithNamePreFilter && !typeMatcherPreFilter.matches(typeDescription)) {
-                            return false;
-                        }
-                        boolean typeMatches;
-                        try {
-                            typeMatches = typeMatcher.matches(typeDescription) && versionPostFilter.matches(protectionDomain);
-                        } catch (Exception ignored) {
-                            // could be because of a missing type
-                            typeMatches = false;
-                        }
-                        if (typeMatches) {
-                            logger.debug("Type match for instrumentation {}: {} matches {}",
-                                instrumentation.getClass().getSimpleName(), typeMatcher, typeDescription);
-                            try {
-                                instrumentation.onTypeMatch(typeDescription, classLoader, protectionDomain, classBeingRedefined);
-                            } catch (Exception e) {
-                                logger.error(e.getMessage(), e);
-                            }
-                            if (logger.isTraceEnabled()) {
-                                logClassLoaderHierarchy(classLoader, logger, instrumentation);
-                            }
-                        }
-                        return typeMatches;
-                    } finally {
-                        instrumentationStats.getOrCreateTimer(instrumentation.getClass()).addTypeMatchingDuration(System.nanoTime() - start);
+                        instrumentation.onTypeMatch(typeDescription, classLoader, protectionDomain, classBeingRedefined);
+                    } catch (Exception e) {
+                        logger.error(e.getMessage(), e);
+                    }
+                    if (logger.isTraceEnabled()) {
+                        logClassLoaderHierarchy(classLoader, logger, instrumentation);
                     }
                 }
-            })
+                return typeMatches;
+
+            }
+        };
+        AgentBuilder.RawMatcher statsCollectingMatcher = new AgentBuilder.RawMatcher() {
+            @Override
+            public boolean matches(TypeDescription typeDescription, ClassLoader classLoader, JavaModule module, Class<?> classBeingRedefined, ProtectionDomain protectionDomain) {
+                long start = System.nanoTime();
+                try {
+                    return matcher.matches(typeDescription, classLoader, module, classBeingRedefined, protectionDomain);
+                } finally {
+                    instrumentationStats.getOrCreateTimer(instrumentation.getClass()).addTypeMatchingDuration(System.nanoTime() - start);
+                }
+            }
+        };
+        return agentBuilder
+            .type(instrumentationStats.shouldMeasureMatching() ? statsCollectingMatcher : matcher)
             .transform(new PatchBytecodeVersionTo51Transformer())
             .transform(getTransformer(instrumentation, logger, methodMatcher))
             .transform(new AgentBuilder.Transformer() {
                 @Override
                 public DynamicType.Builder<?> transform(DynamicType.Builder<?> builder, TypeDescription typeDescription,
-                                                        ClassLoader classLoader, JavaModule module) {
+                                                        ClassLoader classLoader, JavaModule module, ProtectionDomain protectionDomain) {
                     return builder.visit(MinimumClassFileVersionValidator.V1_4)
                         // As long as we allow 1.4 bytecode, we need to add this constant pool adjustment as well
                         .visit(TypeConstantAdjustment.INSTANCE);
@@ -443,30 +449,37 @@ public class ElasticApmAgent {
             withCustomMapping = withCustomMapping.bind(offsetMapping);
         }
         withCustomMapping = withCustomMapping.bootstrap(IndyBootstrap.getIndyBootstrapMethod(logger));
-        return new AgentBuilder.Transformer.ForAdvice(withCustomMapping)
-            .advice(new ElementMatcher<MethodDescription>() {
-                @Override
-                public boolean matches(MethodDescription target) {
-                    long start = System.nanoTime();
-                    try {
-                        boolean matches;
-                        try {
-                            matches = methodMatcher.matches(target);
-                        } catch (Exception ignored) {
-                            // could be because of a missing type
-                            matches = false;
-                        }
-                        if (matches) {
-                            logger.debug("Method match for instrumentation {}: {} matches {}",
-                                instrumentation.getClass().getSimpleName(), methodMatcher, target);
-                            instrumentationStats.addUsedInstrumentation(instrumentation);
-                        }
-                        return matches;
-                    } finally {
-                        instrumentationStats.getOrCreateTimer(instrumentation.getClass()).addMethodMatchingDuration(System.nanoTime() - start);
-                    }
+        final ElementMatcher<MethodDescription> matcher = new ElementMatcher<MethodDescription>() {
+            @Override
+            public boolean matches(MethodDescription target) {
+                boolean matches;
+                try {
+                    matches = methodMatcher.matches(target);
+                } catch (Exception ignored) {
+                    // could be because of a missing type
+                    matches = false;
                 }
-            }, instrumentation.getAdviceClassName())
+                if (matches) {
+                    logger.debug("Method match for instrumentation {}: {} matches {}",
+                        instrumentation.getClass().getSimpleName(), methodMatcher, target);
+                    instrumentationStats.addUsedInstrumentation(instrumentation);
+                }
+                return matches;
+            }
+        };
+        ElementMatcher<MethodDescription> statsCollectingMatcher = new ElementMatcher<MethodDescription>() {
+            @Override
+            public boolean matches(MethodDescription target) {
+                long start = System.nanoTime();
+                try {
+                    return matcher.matches(target);
+                } finally {
+                    instrumentationStats.getOrCreateTimer(instrumentation.getClass()).addMethodMatchingDuration(System.nanoTime() - start);
+                }
+            }
+        };
+        return new AgentBuilder.Transformer.ForAdvice(withCustomMapping)
+            .advice(instrumentationStats.shouldMeasureMatching() ? statsCollectingMatcher : matcher, instrumentation.getAdviceClassName())
             .include(ClassLoader.getSystemClassLoader(), instrumentation.getClass().getClassLoader())
             .withExceptionHandler(PRINTING);
     }
@@ -521,7 +534,7 @@ public class ElasticApmAgent {
         }
     }
 
-    private static void checkInline(MethodDescription.InDefinedShape advice, String adviceClassName, boolean isInline){
+    private static void checkInline(MethodDescription.InDefinedShape advice, String adviceClassName, boolean isInline) {
         if (isInline) {
             throw new IllegalStateException(String.format("Indy-dispatched advice %s#%s has to be declared with inline=false", adviceClassName, advice.getName()));
         } else if (!Modifier.isPublic(advice.getModifiers())) {
@@ -566,7 +579,7 @@ public class ElasticApmAgent {
         }
     }
 
-    static InstrumentationStats getInstrumentationStats() {
+    public static InstrumentationStats getInstrumentationStats() {
         return instrumentationStats;
     }
 
@@ -676,11 +689,20 @@ public class ElasticApmAgent {
             .or(nameStartsWith("com.p6spy."))
             .or(nameStartsWith("net.bytebuddy."))
             .or(nameStartsWith("org.stagemonitor."))
+            .or(any(), classLoaderWithNamePrefix("com.newrelic."))
             .or(nameStartsWith("com.newrelic."))
+            .or(any(), classLoaderWithNamePrefix("com.nr.agent."))
+            .or(nameStartsWith("com.nr.agent."))
+            .or(any(), classLoaderWithNamePrefix("com.dynatrace."))
             .or(nameStartsWith("com.dynatrace."))
             // AppDynamics
+            .or(any(), classLoaderWithNamePrefix("com.singularity"))
             .or(nameStartsWith("com.singularity."))
+            .or(any(), classLoaderWithNamePrefix("com.appdynamics."))
+            .or(nameStartsWith("com.appdynamics."))
+            .or(any(), classLoaderWithNamePrefix("com.instana."))
             .or(nameStartsWith("com.instana."))
+            .or(any(), classLoaderWithNamePrefix("datadog."))
             .or(nameStartsWith("datadog."))
             .or(nameStartsWith("org.glowroot."))
             .or(nameStartsWith("com.compuware."))
@@ -722,7 +744,7 @@ public class ElasticApmAgent {
      * that is specific to the provided class to instrument.
      * </p>
      *
-     * @param classToInstrument the class which should be instrumented
+     * @param classToInstrument      the class which should be instrumented
      * @param instrumentationClasses the instrumentation which should be applied to the class to instrument.
      */
     public static void ensureInstrumented(Class<?> classToInstrument, Collection<Class<? extends ElasticApmInstrumentation>> instrumentationClasses) {
@@ -855,6 +877,7 @@ public class ElasticApmAgent {
     /**
      * Returns the class loader that loaded the instrumentation class corresponding the given advice class.
      * We expect to be able to find the advice class file through this class loader.
+     *
      * @param adviceClass name of the advice class
      * @return class loader that can be used for the advice class file lookup
      */

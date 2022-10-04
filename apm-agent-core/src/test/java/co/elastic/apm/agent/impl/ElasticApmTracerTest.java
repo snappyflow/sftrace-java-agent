@@ -27,12 +27,16 @@ import co.elastic.apm.agent.impl.error.ErrorCapture;
 import co.elastic.apm.agent.impl.sampling.ConstantSampler;
 import co.elastic.apm.agent.impl.stacktrace.StacktraceConfiguration;
 import co.elastic.apm.agent.impl.transaction.AbstractSpan;
+import co.elastic.apm.agent.impl.transaction.ElasticContext;
 import co.elastic.apm.agent.impl.transaction.Outcome;
 import co.elastic.apm.agent.impl.transaction.Span;
 import co.elastic.apm.agent.impl.transaction.TraceContext;
 import co.elastic.apm.agent.impl.transaction.Transaction;
 import co.elastic.apm.agent.matcher.WildcardMatcher;
+import co.elastic.apm.agent.metrics.Labels;
 import co.elastic.apm.agent.objectpool.TestObjectPoolFactory;
+import co.elastic.apm.agent.report.ApmServerClient;
+import co.elastic.apm.agent.report.ReporterConfiguration;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -48,6 +52,9 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.AdditionalAnswers.delegatesTo;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class ElasticApmTracerTest {
@@ -56,6 +63,8 @@ class ElasticApmTracerTest {
     private MockReporter reporter;
     private ConfigurationRegistry config;
 
+    private ApmServerClient apmServerClient;
+
     private TestObjectPoolFactory objectPoolFactory;
 
     @BeforeEach
@@ -63,10 +72,15 @@ class ElasticApmTracerTest {
         objectPoolFactory = new TestObjectPoolFactory();
         reporter = new MockReporter();
         config = SpyConfiguration.createSpyConfig();
+
+        apmServerClient = new ApmServerClient(config.getConfig(ReporterConfiguration.class), config.getConfig(CoreConfiguration.class));
+        apmServerClient = mock(ApmServerClient.class, delegatesTo(apmServerClient));
+
         tracerImpl = new ElasticApmTracerBuilder()
             .configurationRegistry(config)
             .reporter(reporter)
             .withObjectPoolFactory(objectPoolFactory)
+            .withApmServerClient(apmServerClient)
             .buildAndStart();
     }
 
@@ -211,6 +225,28 @@ class ElasticApmTracerTest {
         assertThat(reporter.getErrors()).isEmpty();
     }
 
+    @Test
+    void testTransactionNameGrouping() {
+        when(config.getConfig(CoreConfiguration.class).getTransactionNameGroups())
+            .thenReturn(List.of(WildcardMatcher.valueOf("GET /foo/*/bar")));
+
+        Transaction transaction = tracerImpl.startRootTransaction(null).appendToName("GET ").appendToName("/foo/42/bar");
+        try (Scope scope = transaction.activateInScope()) {
+            transaction.captureException(new RuntimeException("Test error capturing"));
+        }
+        transaction.end();
+        assertThat(reporter.getFirstTransaction().getNameAsString()).isEqualTo("GET /foo/*/bar");
+        assertThat(reporter.getFirstError().getTransactionInfo().getName().toString()).isEqualTo("GET /foo/*/bar");
+        tracerImpl.getMetricRegistry().flipPhaseAndReport(metricSets -> {
+            assertThat(metricSets.get(Labels.Mutable.of()
+                .transactionName("GET /foo/*/bar")
+                .transactionType("custom")
+                .spanType("app")))
+                .isNotNull();
+        });
+
+    }
+
     private static class DummyException1 extends Exception {
         DummyException1() {
         }
@@ -302,6 +338,51 @@ class ElasticApmTracerTest {
     }
 
     @Test
+    void testActivationStackOverflow() {
+        when(tracerImpl.getConfig(CoreConfiguration.class).getTransactionMaxSpans()).thenReturn(2);
+        Transaction transaction = startTestRootTransaction();
+        assertThat(tracerImpl.getActive()).isNull();
+        try (Scope scope = transaction.activateInScope()) {
+            assertThat(tracerImpl.getActive()).isEqualTo(transaction);
+            Span child1 = transaction.createSpan();
+            try (Scope childScope = child1.activateInScope()) {
+                assertThat(tracerImpl.getActive()).isEqualTo(child1);
+                Span grandchild1 = child1.createSpan();
+                try (Scope grandchildScope = grandchild1.activateInScope()) {
+                    // latter activation should not be applied due to activation stack overflow
+                    assertThat(tracerImpl.getActive()).isEqualTo(child1);
+                    Span ggc = grandchild1.createSpan();
+                    try (Scope ggcScope = ggc.activateInScope()) {
+                        assertThat(tracerImpl.getActive()).isEqualTo(child1);
+                        ggc.end();
+                    }
+                    grandchild1.end();
+                }
+                assertThat(tracerImpl.getActive()).isEqualTo(child1);
+                child1.end();
+            }
+            assertThat(tracerImpl.getActive()).isEqualTo(transaction);
+            Span child2 = transaction.createSpan();
+            try (Scope childScope = child2.activateInScope()) {
+                assertThat(tracerImpl.getActive()).isEqualTo(child2);
+                Span grandchild2 = child2.createSpan();
+                try (Scope grandchildScope = grandchild2.activateInScope()) {
+                    // latter activation should not be applied due to activation stack overflow
+                    assertThat(tracerImpl.getActive()).isEqualTo(child2);
+                    grandchild2.end();
+                }
+                assertThat(tracerImpl.getActive()).isEqualTo(child2);
+                child2.end();
+            }
+            assertThat(tracerImpl.getActive()).isEqualTo(transaction);
+            transaction.end();
+        }
+        assertThat(tracerImpl.getActive()).isNull();
+        assertThat(reporter.getTransactions()).hasSize(1);
+        assertThat(reporter.getSpans()).hasSize(2);
+    }
+
+    @Test
     void testPause() {
         tracerImpl.pause();
         assertThat(startTestRootTransaction()).isNull();
@@ -338,7 +419,19 @@ class ElasticApmTracerTest {
     }
 
     @Test
-    void testSamplingNone() throws IOException {
+    void testSamplingNone_sendUnsampled() throws IOException {
+        doReturn(true).when(apmServerClient).supportsKeepingUnsampledTransaction();
+        testSamplingNone(true);
+    }
+
+    @Test
+    void testSamplingNone_dropUnsampled() throws IOException {
+        doReturn(false).when(apmServerClient).supportsKeepingUnsampledTransaction();
+        testSamplingNone(false);
+    }
+
+    void testSamplingNone(boolean keepUnsampled) throws IOException {
+
         config.getConfig(CoreConfiguration.class).getSampleRate().update(0.0, SpyConfiguration.CONFIG_SOURCE_NAME);
         Transaction transaction = startTestRootTransaction().withType("request");
 
@@ -350,11 +443,30 @@ class ElasticApmTracerTest {
             }
             transaction.end();
         }
-        // we do report non-sampled transactions (without the context)
-        assertThat(reporter.getTransactions()).hasSize(1);
-        assertThat(reporter.getSpans()).hasSize(0);
-        assertThat(reporter.getFirstTransaction().getContext().getUser().getEmail()).isNull();
-        assertThat(reporter.getFirstTransaction().getType()).isEqualTo("request");
+
+        if(keepUnsampled){
+            // we do report non-sampled transactions (without the context)
+            assertThat(reporter.getTransactions())
+                .describedAs("non-sampled transaction should be kept")
+                .hasSize(1);
+
+            assertThat(reporter.getFirstTransaction().getType()).isEqualTo("request");
+            assertThat(reporter.getFirstTransaction().isSampled()).isFalse();
+
+            assertThat(reporter.getFirstTransaction().getContext().getUser().getEmail())
+                .describedAs("non-sampled transaction context should be drpped")
+                .isNull();
+        } else {
+            assertThat(reporter.getTransactions())
+                .describedAs("non-sampled transaction should be dropped")
+                .hasSize(0);
+
+        }
+
+        assertThat(reporter.getSpans())
+            .describedAs("spans within non-sampled transactions should dropped")
+            .hasSize(0);
+
     }
 
     @Test
@@ -434,8 +546,8 @@ class ElasticApmTracerTest {
 
         ClassLoader cl = getClass().getClassLoader();
         ServiceInfo overridden = ServiceInfo.of("overridden");
-        tracer.overrideServiceInfoForClassLoader(cl, overridden);
-        assertThat(tracer.getServiceInfo(cl)).isEqualTo(overridden);
+        tracer.setServiceInfoForClassLoader(cl, overridden);
+        assertThat(tracer.getServiceInfoForClassLoader(cl)).isEqualTo(overridden);
 
         startTestRootTransaction().end();
 
@@ -452,8 +564,8 @@ class ElasticApmTracerTest {
             .configurationRegistry(localConfig)
             .buildAndStart();
         ClassLoader cl = getClass().getClassLoader();
-        tracer.overrideServiceInfoForClassLoader(cl, ServiceInfo.of("overridden"));
-        assertThat(tracer.getServiceInfo(cl)).isNull();
+        tracer.setServiceInfoForClassLoader(cl, ServiceInfo.of("overridden"));
+        assertThat(tracer.getServiceInfoForClassLoader(cl)).isNull();
 
         startTestRootTransaction().end();
 
@@ -474,8 +586,8 @@ class ElasticApmTracerTest {
             .buildAndStart();
 
         ClassLoader cl = getClass().getClassLoader();
-        tracer.overrideServiceInfoForClassLoader(cl, ServiceInfo.of("overridden"));
-        assertThat(tracer.getServiceInfo(cl)).isNull();
+        tracer.setServiceInfoForClassLoader(cl, ServiceInfo.of("overridden"));
+        assertThat(tracer.getServiceInfoForClassLoader(cl)).isNull();
 
         startTestRootTransaction().end();
 
@@ -505,7 +617,7 @@ class ElasticApmTracerTest {
             .buildAndStart();
 
         ServiceInfo overridden = ServiceInfo.of("overridden_name", "overridden_version");
-        tracer.overrideServiceInfoForClassLoader(getClass().getClassLoader(), overridden);
+        tracer.setServiceInfoForClassLoader(getClass().getClassLoader(), overridden);
 
         startTestRootTransaction().end();
 
@@ -522,8 +634,8 @@ class ElasticApmTracerTest {
 
         ServiceInfo overridden = ServiceInfo.of("overridden_name", "overridden_version");
         ClassLoader cl = getClass().getClassLoader();
-        tracer.overrideServiceInfoForClassLoader(cl, overridden);
-        assertThat(tracer.getServiceInfo(cl)).isEqualTo(overridden);
+        tracer.setServiceInfoForClassLoader(cl, overridden);
+        assertThat(tracer.getServiceInfoForClassLoader(cl)).isEqualTo(overridden);
 
         startTestRootTransaction().end();
 
@@ -556,4 +668,63 @@ class ElasticApmTracerTest {
         assertThat(error.getTransactionInfo().getName().toString()).isEqualTo("My Transaction");
     }
 
+    @Test
+    void testContextWrapping() {
+        Transaction transaction = startTestRootTransaction();
+        try (Scope scope = transaction.activateInScope()) {
+
+            assertThat(tracerImpl.currentContext())
+                .describedAs("native span/transaction is not wrapped")
+                .isSameAs(transaction);
+
+            TestContext testContext = tracerImpl.wrapActiveContextIfRequired(TestContext.class, () -> new TestContext());
+
+            assertThat(tracerImpl.wrapActiveContextIfRequired(TestContext.class, () -> new TestContext()))
+                .describedAs("wrap should only happen once and if required")
+                .isSameAs(testContext);
+
+            assertThat(tracerImpl.currentContext())
+                .describedAs("after wrapping the active context remains the same")
+                .isSameAs(transaction);
+
+            transaction.end();
+        }
+
+    }
+
+    private static final class TestContext implements ElasticContext<TestContext> {
+
+        @Override
+        public TestContext activate() {
+            return null;
+        }
+
+        @Override
+        public TestContext deactivate() {
+            return null;
+        }
+
+        @Override
+        public Scope activateInScope() {
+            return null;
+        }
+
+        @Override
+        public ElasticContext<TestContext> withActiveSpan(AbstractSpan<?> span) {
+            return null;
+        }
+
+        @org.jetbrains.annotations.Nullable
+        @Override
+        public AbstractSpan<?> getSpan() {
+            return null;
+        }
+
+        @org.jetbrains.annotations.Nullable
+        @Override
+        public Transaction getTransaction() {
+            return null;
+        }
+
+    }
 }

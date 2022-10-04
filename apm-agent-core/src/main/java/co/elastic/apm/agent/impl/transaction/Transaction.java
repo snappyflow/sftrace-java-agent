@@ -19,11 +19,13 @@
 package co.elastic.apm.agent.impl.transaction;
 
 import co.elastic.apm.agent.configuration.CoreConfiguration;
+import co.elastic.apm.agent.configuration.SpanConfiguration;
 import co.elastic.apm.agent.impl.ElasticApmTracer;
 import co.elastic.apm.agent.impl.context.Response;
 import co.elastic.apm.agent.impl.context.TransactionContext;
 import co.elastic.apm.agent.impl.context.web.ResultUtil;
 import co.elastic.apm.agent.impl.sampling.Sampler;
+import co.elastic.apm.agent.matcher.WildcardMatcher;
 import co.elastic.apm.agent.metrics.Labels;
 import co.elastic.apm.agent.metrics.MetricRegistry;
 import co.elastic.apm.agent.metrics.Timer;
@@ -32,6 +34,9 @@ import org.HdrHistogram.WriterReaderPhaser;
 
 import javax.annotation.Nullable;
 import java.util.List;
+
+import static co.elastic.apm.agent.configuration.CoreConfiguration.TraceContinuationStrategy.RESTART;
+import static co.elastic.apm.agent.configuration.CoreConfiguration.TraceContinuationStrategy.RESTART_EXTERNAL;
 
 /**
  * Data captured by an agent representing an event occurring in a monitored service
@@ -54,6 +59,7 @@ public class Transaction extends AbstractSpan<Transaction> {
      */
     private final TransactionContext context = new TransactionContext();
     private final SpanCount spanCount = new SpanCount();
+    private final DroppedSpanStats droppedSpanStats = new DroppedSpanStats();
     /**
      * type: subtype: timer
      * <p>
@@ -65,6 +71,8 @@ public class Transaction extends AbstractSpan<Transaction> {
      */
     private final KeyListConcurrentHashMap<String, KeyListConcurrentHashMap<String, Timer>> timerBySpanTypeAndSubtype = new KeyListConcurrentHashMap<>();
     private final WriterReaderPhaser phaser = new WriterReaderPhaser();
+    private final CoreConfiguration coreConfig;
+    private final SpanConfiguration spanConfig;
 
     /**
      * The result of the transaction. HTTP status code for HTTP-related
@@ -78,14 +86,13 @@ public class Transaction extends AbstractSpan<Transaction> {
      */
     private boolean noop;
 
-    /**
-     * Keyword of specific relevance in the service's domain (eg:  'request', 'backgroundjob')
-     * (Required)
-     */
-    @Nullable
-    private volatile String type;
-
     private int maxSpans;
+
+    private boolean spanCompressionEnabled;
+
+    private long spanCompressionExactMatchMaxDurationUs;
+
+    private long spanCompressionSameKindMaxDurationUs;
 
     @Nullable
     private String frameworkName;
@@ -109,29 +116,54 @@ public class Transaction extends AbstractSpan<Transaction> {
 
     public Transaction(ElasticApmTracer tracer) {
         super(tracer);
+        coreConfig = tracer.getConfig(CoreConfiguration.class);
+        spanConfig = tracer.getConfig(SpanConfiguration.class);
     }
 
-    public <T> Transaction start(TraceContext.ChildContextCreator<T> childContextCreator, @Nullable T parent, long epochMicros,
-                                 Sampler sampler, @Nullable ClassLoader initiatingClassLoader) {
-        traceContext.setApplicationClassLoader(initiatingClassLoader);
-        boolean startedAsChild = parent != null && childContextCreator.asChildOf(traceContext, parent);
-        onTransactionStart(startedAsChild, epochMicros, sampler);
+    public <T> Transaction startRoot(long epochMicros, Sampler sampler) {
+        traceContext.asRootSpan(sampler);
+        onTransactionStart(epochMicros);
         return this;
     }
 
-    public <T, A> Transaction start(TraceContext.ChildContextCreatorTwoArg<T, A> childContextCreator, @Nullable T parent, A arg,
-                                    long epochMicros, Sampler sampler, @Nullable ClassLoader initiatingClassLoader) {
-        traceContext.setApplicationClassLoader(initiatingClassLoader);
-        boolean startedAsChild = childContextCreator.asChildOf(traceContext, parent, arg);
-        onTransactionStart(startedAsChild, epochMicros, sampler);
-        return this;
-    }
-
-    private void onTransactionStart(boolean startedAsChild, long epochMicros, Sampler sampler) {
-        maxSpans = tracer.getConfig(CoreConfiguration.class).getTransactionMaxSpans();
-        if (!startedAsChild) {
-            traceContext.asRootSpan(sampler);
+    public <H, C> Transaction start(
+        TraceContext.HeaderChildContextCreator<H, C> childContextCreator,
+        @Nullable C parent,
+        HeaderGetter<H, C> headerGetter,
+        long epochMicros,
+        Sampler sampler
+    ) {
+        if (parent == null) {
+            return startRoot(epochMicros, sampler);
         }
+        CoreConfiguration.TraceContinuationStrategy traceContinuationStrategy = coreConfig.getTraceContinuationStrategy();
+        boolean restartTrace = false;
+        if (traceContinuationStrategy.equals(RESTART)) {
+            restartTrace = true;
+        } else if (traceContinuationStrategy.equals(RESTART_EXTERNAL)) {
+            restartTrace = !TraceState.includesElasticVendor(headerGetter, parent);
+        }
+        if (restartTrace) {
+            // need to add a span link
+            addSpanLink(childContextCreator, headerGetter, parent);
+            traceContext.asRootSpan(sampler);
+        } else {
+            boolean valid = childContextCreator.asChildOf(traceContext, parent, headerGetter);
+            if (!valid) {
+                traceContext.asRootSpan(sampler);
+            }
+        }
+
+        onTransactionStart(epochMicros);
+        return this;
+    }
+
+    private void onTransactionStart(long epochMicros) {
+        maxSpans = coreConfig.getTransactionMaxSpans();
+        spanCompressionEnabled = spanConfig.isSpanCompressionEnabled();
+        spanCompressionExactMatchMaxDurationUs = spanConfig.getSpanCompressionExactMatchMaxDuration().getMicros();
+        spanCompressionSameKindMaxDurationUs = spanConfig.getSpanCompressionSameKindMaxDuration().getMicros();
+
         if (epochMicros >= 0) {
             setStartTimestamp(epochMicros);
         } else {
@@ -167,14 +199,6 @@ public class Transaction extends AbstractSpan<Transaction> {
         synchronized (this) {
             return context;
         }
-    }
-
-    /**
-     * Keyword of specific relevance in the service's domain (eg:  'request', 'backgroundjob')
-     */
-    public Transaction withType(@Nullable String type) {
-        this.type = type;
-        return this;
     }
 
     /**
@@ -219,9 +243,6 @@ public class Transaction extends AbstractSpan<Transaction> {
         if (!isSampled()) {
             context.resetState();
         }
-        if (type == null) {
-            type = "custom";
-        }
 
         if (outcomeNotSet()) {
             // set outcome from HTTP status if not already set
@@ -253,6 +274,17 @@ public class Transaction extends AbstractSpan<Transaction> {
         return spanCount;
     }
 
+    public void captureDroppedSpan(Span span) {
+        if (span.isSampled()) {
+            spanCount.getDropped().incrementAndGet();
+        }
+        droppedSpanStats.captureDroppedSpan(span);
+    }
+
+    public DroppedSpanStats getDroppedSpanStats() {
+        return droppedSpanStats;
+    }
+
     boolean isSpanLimitReached() {
         return getSpanCount().isSpanLimitReached(maxSpans);
     }
@@ -267,9 +299,12 @@ public class Transaction extends AbstractSpan<Transaction> {
         context.resetState();
         result = null;
         spanCount.resetState();
-        type = null;
+        droppedSpanStats.resetState();
         noop = false;
         maxSpans = 0;
+        spanCompressionEnabled = false;
+        spanCompressionExactMatchMaxDurationUs = 0L;
+        spanCompressionSameKindMaxDurationUs = 0L;
         frameworkName = null;
         frameworkVersion = null;
         faas.resetState();
@@ -285,11 +320,6 @@ public class Transaction extends AbstractSpan<Transaction> {
      */
     public void ignoreTransaction() {
         noop = true;
-    }
-
-    @Nullable
-    public String getType() {
-        return type;
     }
 
     public void addCustomContext(String key, String value) {
@@ -362,6 +392,29 @@ public class Transaction extends AbstractSpan<Transaction> {
      */
     public Faas getFaas() {
         return faas;
+    }
+
+    public boolean isSpanCompressionEnabled() {
+        return spanCompressionEnabled;
+    }
+
+    public long getSpanCompressionExactMatchMaxDurationUs() {
+        return spanCompressionExactMatchMaxDurationUs;
+    }
+
+    public long getSpanCompressionSameKindMaxDurationUs() {
+        return spanCompressionSameKindMaxDurationUs;
+    }
+
+    @Override
+    public StringBuilder getNameForSerialization() {
+        StringBuilder name = this.name;
+        WildcardMatcher match = WildcardMatcher.anyMatch(coreConfig.getTransactionNameGroups(), name);
+        if (match != null) {
+            name.setLength(0);
+            name.append(match);
+        }
+        return name;
     }
 
     @Override

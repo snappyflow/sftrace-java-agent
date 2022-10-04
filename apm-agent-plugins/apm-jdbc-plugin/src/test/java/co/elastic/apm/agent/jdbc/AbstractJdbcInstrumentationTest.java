@@ -19,6 +19,7 @@
 package co.elastic.apm.agent.jdbc;
 
 import co.elastic.apm.agent.AbstractInstrumentationTest;
+import co.elastic.apm.agent.configuration.SpanConfiguration;
 import co.elastic.apm.agent.db.signature.SignatureParser;
 import co.elastic.apm.agent.impl.context.Db;
 import co.elastic.apm.agent.impl.context.Destination;
@@ -45,9 +46,10 @@ import java.util.concurrent.TimeUnit;
 
 import static co.elastic.apm.agent.jdbc.helper.JdbcHelper.DB_SPAN_ACTION;
 import static co.elastic.apm.agent.jdbc.helper.JdbcHelper.DB_SPAN_TYPE;
-import static org.assertj.core.api.Assertions.assertThat;
+import static co.elastic.apm.agent.testutils.assertions.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.fail;
+import static org.mockito.Mockito.when;
 
 /**
  * Uses plain connections without a connection pool
@@ -59,7 +61,9 @@ public abstract class AbstractJdbcInstrumentationTest extends AbstractInstrument
     private static final long PREPARED_STMT_TIMEOUT = 10000;
 
     private final String expectedDbVendor;
-    private Connection connection;
+    private final String expectedDbName;
+    private final boolean dbNameFromUrl;
+    private final Connection connection;
     @Nullable
     private PreparedStatement preparedStatement;
     @Nullable
@@ -67,14 +71,22 @@ public abstract class AbstractJdbcInstrumentationTest extends AbstractInstrument
     private final Transaction transaction;
     private final SignatureParser signatureParser;
 
-    AbstractJdbcInstrumentationTest(Connection connection, String expectedDbVendor) throws Exception {
+    AbstractJdbcInstrumentationTest(Connection connection, String expectedDbVendor, String expectedDbName) throws Exception {
+        this(connection, expectedDbVendor, expectedDbName, true);
+    }
+
+    AbstractJdbcInstrumentationTest(Connection connection, String expectedDbVendor, String expectedDbName, boolean dbNameFromUrl) throws Exception {
         this.connection = connection;
         this.expectedDbVendor = expectedDbVendor;
+        this.expectedDbName = expectedDbName;
         connection.createStatement().execute("CREATE TABLE ELASTIC_APM (FOO INT NOT NULL, BAR VARCHAR(255))");
         connection.createStatement().execute("ALTER TABLE ELASTIC_APM ADD PRIMARY KEY (FOO)");
+        when(config.getConfig(SpanConfiguration.class).isSpanCompressionEnabled()).thenReturn(false);
         transaction = startTestRootTransaction("jdbc-test");
         signatureParser = new SignatureParser();
+        this.dbNameFromUrl = dbNameFromUrl;
     }
+
 
     @Before
     public void setUp() throws Exception {
@@ -224,7 +236,10 @@ public abstract class AbstractJdbcInstrumentationTest extends AbstractInstrument
         assertThat(testConnection.getUnsupportedThrownCount()).isEqualTo(1);
         assertThat(isResultSet).isFalse();
 
-        assertSpanRecorded(sql, false, -1, null);
+        // if the DB name is provided through URL, we still have it
+        // if we don't, then we can't use the connection catalog fallback
+        String dbName = dbNameFromUrl ? expectedDbName: null;
+        assertSpanRecorded(sql, false, -1, dbName);
 
         // try to execute statement again, should not throw again
         statement.execute(sql);
@@ -395,8 +410,7 @@ public abstract class AbstractJdbcInstrumentationTest extends AbstractInstrument
         statement.execute(insert);
 
         assertThat(reporter.getSpans()).hasSize(1);
-        Db db = reporter.getFirstSpan().getContext().getDb();
-        assertThat(db.getStatement()).isEqualTo(insert);
+        assertThat(reporter.getFirstSpan()).hasDbStatement(insert);
     }
 
     private void assertQuerySucceededAndSpanRecorded(ResultSet resultSet, String rawSql, boolean preparedStatement) throws SQLException {
@@ -409,10 +423,10 @@ public abstract class AbstractJdbcInstrumentationTest extends AbstractInstrument
     }
 
     private Span assertSpanRecorded(String rawSql, boolean preparedStatement, long expectedAffectedRows) throws SQLException {
-        return assertSpanRecorded(rawSql, preparedStatement, expectedAffectedRows, connection.getCatalog());
+        return assertSpanRecorded(rawSql, preparedStatement, expectedAffectedRows, expectedDbName);
     }
 
-    private Span assertSpanRecorded(String rawSql, boolean preparedStatement, long expectedAffectedRows, String expectedDbInstance) throws SQLException {
+    private Span assertSpanRecorded(String rawSql, boolean preparedStatement, long expectedAffectedRows, @Nullable String expectedDbInstance) throws SQLException {
         assertThat(reporter.getSpans())
             .describedAs("one span is expected")
             .hasSize(1);
@@ -427,7 +441,7 @@ public abstract class AbstractJdbcInstrumentationTest extends AbstractInstrument
         Db db = span.getContext().getDb();
         assertThat(db.getStatement()).isEqualTo(rawSql);
         DatabaseMetaData metaData = connection.getMetaData();
-        assertThat(db.getInstance()).isEqualToIgnoringCase(expectedDbInstance);
+
         assertThat(db.getUser()).isEqualToIgnoringCase(metaData.getUserName());
         assertThat(db.getType()).isEqualToIgnoringCase("sql");
 
@@ -436,15 +450,29 @@ public abstract class AbstractJdbcInstrumentationTest extends AbstractInstrument
             .isEqualTo(expectedAffectedRows);
 
         Destination destination = span.getContext().getDestination();
-        assertThat(destination.getAddress().toString()).isEqualTo("localhost");
+        assertThat(destination.getAddress().toString()).isIn("localhost", "127.0.0.1");
         if (expectedDbVendor.equals("h2")) {
             assertThat(destination.getPort()).isEqualTo(-1);
         } else {
             assertThat(destination.getPort()).isGreaterThan(0);
         }
 
-        Destination.Service service = destination.getService();
-        assertThat(service.getResource().toString()).isEqualTo(expectedDbVendor);
+        if (expectedDbInstance == null) {
+            assertThat(db.getInstance()).isNull();
+
+            assertThat(span.getContext().getServiceTarget())
+                .hasType(expectedDbVendor)
+                .hasNoName()
+                .hasDestinationResource(expectedDbVendor);
+        } else {
+            assertThat(db.getInstance())
+                .isEqualTo(expectedDbName);
+
+            assertThat(span.getContext().getServiceTarget())
+                .hasType(expectedDbVendor)
+                .hasName(expectedDbInstance)
+                .hasDestinationResource(String.format("%s/%s", expectedDbVendor, expectedDbInstance));
+        }
 
         assertThat(span.getOutcome())
             .describedAs("span outcome should be explicitly set to either failure or success")
@@ -479,8 +507,10 @@ public abstract class AbstractJdbcInstrumentationTest extends AbstractInstrument
         assertThat(destination.getAddress()).isNullOrEmpty();
         assertThat(destination.getPort()).isLessThanOrEqualTo(0);
 
-        Destination.Service service = destination.getService();
-        assertThat(service.getResource()).isNullOrEmpty();
+        assertThat(jdbcSpan.getContext().getServiceTarget())
+            .hasType("unknown")
+            .hasNoName()
+            .hasDestinationResource("unknown");
     }
 
     private static long[] toLongArray(int[] a) {

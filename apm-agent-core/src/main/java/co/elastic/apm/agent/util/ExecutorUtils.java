@@ -25,6 +25,7 @@ import co.elastic.apm.agent.sdk.logging.LoggerFactory;
 import javax.annotation.Nullable;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -71,6 +72,10 @@ public final class ExecutorUtils {
         return new NamedDaemonThreadPoolExecutor(poolSize, queueCapacity, daemonThreadFactory, threadPurpose);
     }
 
+    public static boolean isAgentExecutor(Executor executor) {
+        return executor.getClass().getName().startsWith("co.elastic.apm");
+    }
+
     public static class SingleNamedThreadFactory implements ThreadFactory {
         private final String threadName;
 
@@ -84,7 +89,7 @@ public final class ExecutorUtils {
             thread.setDaemon(true);
             thread.setName(threadName);
             ClassLoader originalContextCL = thread.getContextClassLoader();
-            thread.setContextClassLoader(null);
+            thread.setContextClassLoader(ExecutorUtils.class.getClassLoader());
             logThreadCreation(originalContextCL, threadName);
             return thread;
         }
@@ -116,7 +121,7 @@ public final class ExecutorUtils {
             String threadName = ThreadUtils.addElasticApmThreadPrefix(threadPurpose) + "-" + threadCounter.getAndIncrement();
             thread.setName(threadName);
             ClassLoader originalContextCL = thread.getContextClassLoader();
-            thread.setContextClassLoader(null);
+            thread.setContextClassLoader(ExecutorUtils.class.getClassLoader());
             logThreadCreation(originalContextCL, threadName);
             return thread;
         }

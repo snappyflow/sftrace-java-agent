@@ -23,16 +23,12 @@ import co.elastic.apm.agent.impl.ElasticApmTracer;
 import co.elastic.apm.agent.impl.Tracer;
 import co.elastic.apm.agent.impl.sampling.Sampler;
 import co.elastic.apm.agent.objectpool.Recyclable;
-import co.elastic.apm.agent.sdk.weakconcurrent.WeakConcurrent;
-import co.elastic.apm.agent.sdk.weakconcurrent.WeakMap;
 import co.elastic.apm.agent.util.ByteUtils;
-import co.elastic.apm.agent.util.ClassLoaderUtils;
 import co.elastic.apm.agent.util.HexUtils;
 import co.elastic.apm.agent.sdk.logging.Logger;
 import co.elastic.apm.agent.sdk.logging.LoggerFactory;
 
 import javax.annotation.Nullable;
-import java.lang.ref.WeakReference;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 
@@ -97,10 +93,6 @@ public class TraceContext implements Recyclable {
 
     private static final Double SAMPLE_RATE_ZERO = 0d;
 
-    /**
-     * Helps to reduce allocations by caching {@link WeakReference}s to {@link ClassLoader}s
-     */
-    private static final WeakMap<ClassLoader, WeakReference<ClassLoader>> classLoaderWeakReferenceCache = WeakConcurrent.buildMap();
     private static final ChildContextCreator<TraceContext> FROM_PARENT_CONTEXT = new ChildContextCreator<TraceContext>() {
         @Override
         public boolean asChildOf(TraceContext child, TraceContext parent) {
@@ -123,10 +115,10 @@ public class TraceContext implements Recyclable {
             }
         }
     };
-    private static final ChildContextCreatorTwoArg FROM_TRACE_CONTEXT_TEXT_HEADERS =
-        new ChildContextCreatorTwoArg<Object, TextHeaderGetter<Object>>() {
+    private static final HeaderChildContextCreator FROM_TRACE_CONTEXT_TEXT_HEADERS =
+        new HeaderChildContextCreator<String, Object>() {
             @Override
-            public boolean asChildOf(TraceContext child, @Nullable Object carrier, TextHeaderGetter<Object> traceContextHeaderGetter) {
+            public boolean asChildOf(TraceContext child, @Nullable Object carrier, HeaderGetter<String, Object> traceContextHeaderGetter) {
                 if (carrier == null) {
                     return false;
                 }
@@ -153,10 +145,10 @@ public class TraceContext implements Recyclable {
                 return isValid;
             }
         };
-    private static final ChildContextCreatorTwoArg FROM_TRACE_CONTEXT_BINARY_HEADERS =
-        new ChildContextCreatorTwoArg<Object, BinaryHeaderGetter<Object>>() {
+    private static final HeaderChildContextCreator FROM_TRACE_CONTEXT_BINARY_HEADERS =
+        new HeaderChildContextCreator<byte[], Object>() {
             @Override
-            public boolean asChildOf(TraceContext child, @Nullable Object carrier, BinaryHeaderGetter<Object> traceContextHeaderGetter) {
+            public boolean asChildOf(TraceContext child, @Nullable Object carrier, HeaderGetter<byte[], Object> traceContextHeaderGetter) {
                 if (carrier == null) {
                     return false;
                 }
@@ -224,9 +216,7 @@ public class TraceContext implements Recyclable {
     private final StringBuilder outgoingTextHeader = new StringBuilder(TEXT_HEADER_EXPECTED_LENGTH);
     private byte flags;
     private boolean discardable = true;
-    // weakly referencing to avoid CL leaks in case of leaked spans
-    @Nullable
-    private WeakReference<ClassLoader> applicationClassLoader;
+
     private final TraceState traceState;
 
     final CoreConfiguration coreConfiguration;
@@ -275,13 +265,13 @@ public class TraceContext implements Recyclable {
     }
 
     @SuppressWarnings("unchecked")
-    public static <C> ChildContextCreatorTwoArg<C, TextHeaderGetter<C>> getFromTraceContextTextHeaders() {
-        return (ChildContextCreatorTwoArg<C, TextHeaderGetter<C>>) FROM_TRACE_CONTEXT_TEXT_HEADERS;
+    public static <C> HeaderChildContextCreator<String, C> getFromTraceContextTextHeaders() {
+        return (HeaderChildContextCreator<String, C>) FROM_TRACE_CONTEXT_TEXT_HEADERS;
     }
 
     @SuppressWarnings("unchecked")
-    public static <C> ChildContextCreatorTwoArg<C, BinaryHeaderGetter<C>> getFromTraceContextBinaryHeaders() {
-        return (ChildContextCreatorTwoArg<C, BinaryHeaderGetter<C>>) FROM_TRACE_CONTEXT_BINARY_HEADERS;
+    public static <C> HeaderChildContextCreator<byte[], C> getFromTraceContextBinaryHeaders() {
+        return (HeaderChildContextCreator<byte[], C>) FROM_TRACE_CONTEXT_BINARY_HEADERS;
     }
 
     public static ChildContextCreator<Tracer> fromActive() {
@@ -440,7 +430,6 @@ public class TraceContext implements Recyclable {
         clock.init(parent.clock);
         serviceName = parent.serviceName;
         serviceVersion = parent.serviceVersion;
-        applicationClassLoader = parent.applicationClassLoader;
         traceState.copyFrom(parent.traceState);
         onMutation();
     }
@@ -457,7 +446,6 @@ public class TraceContext implements Recyclable {
         clock.resetState();
         serviceName = null;
         serviceVersion = null;
-        applicationClassLoader = null;
         traceState.resetState();
         traceState.setSizeLimit(coreConfiguration.getTracestateSizeLimit());
     }
@@ -598,10 +586,14 @@ public class TraceContext implements Recyclable {
      */
     StringBuilder getOutgoingTraceParentTextHeader() {
         if (outgoingTextHeader.length() == 0) {
-            // for unsampled traces, propagate the ID of the transaction in calls to downstream services
-            // such that the parentID of those transactions point to a transaction that exists
-            // remember that we do report unsampled transactions
-            fillTraceParentHeader(outgoingTextHeader, isSampled() ? id : transactionId);
+            synchronized (outgoingTextHeader) {
+                if (outgoingTextHeader.length() == 0) {
+                    // for unsampled traces, propagate the ID of the transaction in calls to downstream services
+                    // such that the parentID of those transactions point to a transaction that exists
+                    // remember that we do report unsampled transactions
+                    fillTraceParentHeader(outgoingTextHeader, isSampled() ? id : transactionId);
+                }
+            }
         }
         return outgoingTextHeader;
     }
@@ -658,7 +650,6 @@ public class TraceContext implements Recyclable {
         clock.init(other.clock);
         serviceName = other.serviceName;
         serviceVersion = other.serviceVersion;
-        applicationClassLoader = other.applicationClassLoader;
         traceState.copyFrom(other.traceState);
         onMutation();
     }
@@ -682,26 +673,22 @@ public class TraceContext implements Recyclable {
     }
 
     /**
-     * Overrides the {@code co.elastic.apm.agent.impl.payload.Service#name} property sent via the meta data Intake V2 event.
+     * Overrides the {@code co.elastic.apm.agent.impl.payload.Service#name} and {@code co.elastic.apm.agent.impl.payload.Service#version} properties sent via the meta data Intake V2 event.
      *
-     * @param serviceName the service name for this event
+     * @param serviceName    the service name for this event
+     * @param serviceVersion the service version for this event
      */
-    public void setServiceName(@Nullable String serviceName) {
+    public void setServiceInfo(@Nullable String serviceName, @Nullable String serviceVersion) {
+        if (serviceName == null || serviceName.isEmpty()) {
+            return;
+        }
         this.serviceName = serviceName;
+        this.serviceVersion = serviceVersion;
     }
 
     @Nullable
     public String getServiceVersion() {
         return serviceVersion;
-    }
-
-    /**
-     * Overrides the {@code co.elastic.apm.agent.impl.payload.Service#version} property sent via the meta data Intake V2 event.
-     *
-     * @param serviceVersion the service version for this event
-     */
-    public void setServiceVersion(@Nullable String serviceVersion) {
-        this.serviceVersion = serviceVersion;
     }
 
     public Span createSpan() {
@@ -730,27 +717,6 @@ public class TraceContext implements Recyclable {
     @Override
     public int hashCode() {
         return Objects.hash(traceId, id, parentId, flags);
-    }
-
-    void setApplicationClassLoader(@Nullable ClassLoader classLoader) {
-        if (ClassLoaderUtils.isBootstrapClassLoader(classLoader) || ClassLoaderUtils.isAgentClassLoader(classLoader)) {
-            return;
-        }
-        WeakReference<ClassLoader> local = classLoaderWeakReferenceCache.get(classLoader);
-        if (local == null) {
-            local = new WeakReference<>(classLoader);
-            classLoaderWeakReferenceCache.putIfAbsent(classLoader, local);
-        }
-        applicationClassLoader = local;
-    }
-
-    @Nullable
-    public ClassLoader getApplicationClassLoader() {
-        if (applicationClassLoader != null) {
-            return applicationClassLoader.get();
-        } else {
-            return null;
-        }
     }
 
     public TraceState getTraceState() {
@@ -820,8 +786,8 @@ public class TraceContext implements Recyclable {
         boolean asChildOf(TraceContext child, T parent);
     }
 
-    public interface ChildContextCreatorTwoArg<T, A> {
-        boolean asChildOf(TraceContext child, @Nullable T parent, A arg);
+    public interface HeaderChildContextCreator<H, C> {
+        boolean asChildOf(TraceContext child, @Nullable C carrier, HeaderGetter<H, C> headerGetter);
     }
 
     public TraceContext copy() {

@@ -41,7 +41,7 @@ import java.util.Map;
 
 public class JakartaServletApiAdapter implements ServletApiAdapter<HttpServletRequest, HttpServletResponse, ServletContext, ServletContextEvent, FilterConfig, ServletConfig> {
 
-    public static final JakartaServletApiAdapter INSTANCE = new JakartaServletApiAdapter();
+    private static final JakartaServletApiAdapter INSTANCE = new JakartaServletApiAdapter();
 
     private JakartaServletApiAdapter() {
     }
@@ -196,6 +196,7 @@ public class JakartaServletApiAdapter implements ServletApiAdapter<HttpServletRe
     }
 
     @Override
+    @Nullable
     public String getPathInfo(HttpServletRequest servletRequest) {
         return servletRequest.getPathInfo();
     }
