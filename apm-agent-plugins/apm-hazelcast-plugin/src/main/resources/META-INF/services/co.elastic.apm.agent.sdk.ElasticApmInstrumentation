@@ -1,0 +1,8 @@
+co.elastic.apm.agent.hazelcast.HazelcastMapInstrumentation
+co.elastic.apm.agent.hazelcast.HazelcastListInstrumentation
+co.elastic.apm.agent.hazelcast.HazelcastQueueInstrumentation
+co.elastic.apm.agent.hazelcast.HazelcastLockInstrumentation
+co.elastic.apm.agent.hazelcast.HazelcastMultiMapInstrumentation
+co.elastic.apm.agent.hazelcast.HazelcastReplMapInstrumentation
+co.elastic.apm.agent.hazelcast.HazelcastTopicInstrumentation
+co.elastic.apm.agent.hazelcast.HazelcastSetInstrumentation

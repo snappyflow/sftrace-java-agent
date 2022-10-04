@@ -136,14 +136,12 @@
                         <id>shade-cached-lookup-key</id>
                         <phase>prepare-package</phase>
                         <configuration>
-
                             <target name="move-and-rename" description="Move and Rename">
                                 <move todir="${project.basedir}/target/classes/cached-lookup-key" overwrite="true">
                                     <fileset dir="${project.basedir}/target/classes/cached-lookup-key" includes="**/*.class" />
                                     <mapper type="regexp" from="^(.*)\.class$$" to="\1\.esclazz" />
                                 </move>
                             </target>
-
                         </configuration>
                         <goals>
                             <goal>run</goal>
@@ -159,10 +157,10 @@
                                     <fileset dir="${project.basedir}/target/classes/agent" includes="**/*.class" />
                                     <mapper type="regexp" from="^(.*)\.class$$" to="\1\.esclazz" />
                                 </move>
-                                <move todir="${project.basedir}/target/classes/META-INF/versions" overwrite="true">
+                                <!-- <move todir="${project.basedir}/target/classes/META-INF/versions" overwrite="true">
                                     <fileset dir="${project.basedir}/target/classes/agent/META-INF/versions" includes="**" />
                                     <mapper type="regexp" from="^(\d+)/(.*)$$" to="\1/agent/\2" />
-                                </move>
+                                </move> -->
                             </target>
 
                         </configuration>
